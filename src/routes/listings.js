@@ -99,8 +99,17 @@ router.post('/', authenticate, requirePartner, [
   const { data: partner } = await db.from('partners')
     .select('id, status').eq('user_id', req.user.id).single();
 
-  if (!partner || partner.status !== 'approved') {
-    return res.status(403).json({ error: 'Votre compte partenaire doit être approuvé' });
+  if (!partner) {
+    return res.status(403).json({ error: 'Compte partenaire introuvable. Inscrivez-vous comme partenaire.' });
+  }
+  if (partner.status === 'pending') {
+    return res.status(403).json({ error: 'Votre compte partenaire est en attente d\'approbation par l\'admin ZUKAGO (24-48h).' });
+  }
+  if (partner.status === 'rejected') {
+    return res.status(403).json({ error: 'Votre compte partenaire a été rejeté. Contactez contact@zukago.com' });
+  }
+  if (partner.status !== 'approved') {
+    return res.status(403).json({ error: 'Compte partenaire non approuvé.' });
   }
 
   const { type, title, description, sub_type, city_code, quartier, address,
