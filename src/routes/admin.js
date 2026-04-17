@@ -64,11 +64,15 @@ router.patch('/partners/:id/suspend', asyncHandler(async (req, res) => {
 // GET /api/admin/listings — Toutes les annonces
 router.get('/listings', asyncHandler(async (req, res) => {
   const status = req.query.status || 'pending';
-  const { data } = await db.from('listings')
-    .select('*, partners(users(name, email))')
+  const { data, error } = await db.from('listings')
+    .select('id, title, type, city_code, quartier, price, unit, status, description, created_at, partner_id, partners(id, user_id, users(name, email))')
     .eq('status', status)
     .order('created_at', { ascending: false });
-  res.json({ listings: data || [] });
+  if (error) {
+    console.error('Admin listings error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+  res.json({ listings: data || [], count: data?.length || 0 });
 }));
 
 // PATCH /api/admin/listings/:id/approve — Approuver annonce
