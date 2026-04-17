@@ -78,29 +78,62 @@ router.get('/listings', asyncHandler(async (req, res) => {
 // PATCH /api/admin/listings/:id/approve — Approuver annonce
 router.patch('/listings/:id/approve', asyncHandler(async (req, res) => {
   const { featured = false } = req.body;
-  const { data: listing } = await db.from('listings')
-    .select('*, partners(users(name, email))').eq('id', req.params.id).single();
-  if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
 
-  await db.from('listings').update({
+  // 1. Vérifier que l'annonce existe
+  const { data: listing, error: listErr } = await db.from('listings')
+    .select('*').eq('id', req.params.id).single();
+  if (listErr || !listing) return res.status(404).json({ error: 'Annonce introuvable' });
+
+  // 2. Approuver
+  const { error: updateErr } = await db.from('listings').update({
     status: 'active',
-    featured,
+    featured: featured || false,
     approved_by: req.user.id,
-    approved_at: new Date(),
+    approved_at: new Date().toISOString(),
   }).eq('id', req.params.id);
 
-  await emailService.sendListingApproved(listing.partners.users, listing);
-  res.json({ message: 'Annonce approuvée et publiée' });
+  if (updateErr) return res.status(500).json({ error: updateErr.message });
+
+  // 3. Notifier le partenaire (sans bloquer si erreur)
+  try {
+    const { data: partner } = await db.from('partners').select('user_id').eq('id', listing.partner_id).single();
+    if (partner) {
+      await db.from('notifications').insert({
+        user_id: partner.user_id,
+        title: 'Annonce approuvée ✅',
+        body: `Votre annonce "${listing.title}" est maintenant visible sur ZUKAGO !`,
+        type: 'booking',
+      });
+    }
+  } catch(e) { console.log('Notif error:', e.message); }
+
+  res.json({ message: 'Annonce approuvée et publiée', listing });
 }));
 
 // PATCH /api/admin/listings/:id/reject — Rejeter annonce
 router.patch('/listings/:id/reject', asyncHandler(async (req, res) => {
   const { message } = req.body;
-  const { data: listing } = await db.from('listings')
-    .select('*, partners(users(name, email))').eq('id', req.params.id).single();
 
-  await db.from('listings').update({ status: 'rejected', rejection_msg: message }).eq('id', req.params.id);
-  await emailService.sendListingRejected(listing.partners.users, listing, message);
+  const { data: listing } = await db.from('listings').select('*').eq('id', req.params.id).single();
+  if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
+
+  await db.from('listings').update({
+    status: 'rejected',
+    rejection_msg: message || 'Ne correspond pas aux critères'
+  }).eq('id', req.params.id);
+
+  // Notifier le partenaire
+  try {
+    const { data: partner } = await db.from('partners').select('user_id').eq('id', listing.partner_id).single();
+    if (partner) {
+      await db.from('notifications').insert({
+        user_id: partner.user_id,
+        title: 'Annonce non approuvée ❌',
+        body: `Votre annonce "${listing.title}" n'a pas été approuvée. Raison: ${message || 'Critères non respectés'}`,
+        type: 'info',
+      });
+    }
+  } catch(e) { console.log('Notif error:', e.message); }
 
   res.json({ message: 'Annonce rejetée' });
 }));
