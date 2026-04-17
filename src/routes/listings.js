@@ -86,9 +86,9 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
 // ─── POST /api/listings — Créer annonce (partenaire) ─────────────────────────
 router.post('/', authenticate, requirePartner, [
   body('type').isIn(['apt', 'hotel', 'car', 'driver']),
-  body('title').trim().isLength({ min: 5, max: 60 }),
-  body('description').trim().isLength({ min: 20 }),
-  body('price').isNumeric().custom(v => v > 0),
+  body('title').trim().isLength({ min: 2, max: 100 }),
+  body('description').trim().isLength({ min: 2 }),
+  body('price').isNumeric(),
   body('city_code').notEmpty(),
   body('quartier').notEmpty(),
 ], asyncHandler(async (req, res) => {

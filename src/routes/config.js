@@ -136,6 +136,13 @@ router.get('/admin/stats', authenticate, requireAdmin, asyncHandler(async (req, 
   });
 }));
 
+// ─── GET /api/config/commission — Public endpoint pour le taux
+router.get('/commission', asyncHandler(async (req, res) => {
+  const { data } = await db.from('app_config')
+    .select('value').eq('key', 'commission_rate').single();
+  res.json({ rate: Number(data?.value || 17) });
+}));
+
 // ─── PATCH /api/config/:key — Admin modifie une config ────────────────────────
 router.patch('/:key', authenticate, requireAdmin, asyncHandler(async (req, res) => {
   const { key } = req.params;
