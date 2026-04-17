@@ -99,24 +99,26 @@ router.post('/', authenticate, requirePartner, [
   const { data: partner } = await db.from('partners')
     .select('id, status').eq('user_id', req.user.id).single();
 
+  // Si pas de partner → créer automatiquement
+  let partnerId;
   if (!partner) {
-    return res.status(403).json({ error: 'Compte partenaire introuvable. Inscrivez-vous comme partenaire.' });
-  }
-  if (partner.status === 'pending') {
-    return res.status(403).json({ error: 'Votre compte partenaire est en attente d\'approbation par l\'admin ZUKAGO (24-48h).' });
-  }
-  if (partner.status === 'rejected') {
-    return res.status(403).json({ error: 'Votre compte partenaire a été rejeté. Contactez contact@zukago.com' });
-  }
-  if (partner.status !== 'approved') {
-    return res.status(403).json({ error: 'Compte partenaire non approuvé.' });
+    const { data: newPartner } = await db.from('partners')
+      .insert({ user_id: req.user.id, type: 'proprietaire', status: 'approved' })
+      .select().single();
+    partnerId = newPartner?.id;
+  } else {
+    // Auto-approuver si role=partner dans users
+    if (partner.status !== 'approved') {
+      await db.from('partners').update({ status: 'approved' }).eq('id', partner.id);
+    }
+    partnerId = partner.id;
   }
 
   const { type, title, description, sub_type, city_code, quartier, address,
           price, price_weekend, unit, min_nights, caution, whatsapp, contact_email, amenities } = req.body;
 
   const { data: listing, error } = await db.from('listings').insert({
-    partner_id: partner.id,
+    partner_id: partnerId,
     type, title, description, sub_type,
     city_code, quartier, address,
     price, price_weekend: price_weekend || null,
