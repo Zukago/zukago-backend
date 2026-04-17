@@ -65,7 +65,7 @@ router.patch('/partners/:id/suspend', asyncHandler(async (req, res) => {
 router.get('/listings', asyncHandler(async (req, res) => {
   const status = req.query.status || 'pending';
   const { data, error } = await db.from('listings')
-    .select('id, title, type, city_code, quartier, price, unit, status, description, created_at, partner_id, partners(id, user_id, users(name, email))')
+    .select('*')
     .eq('status', status)
     .order('created_at', { ascending: false });
   if (error) {
