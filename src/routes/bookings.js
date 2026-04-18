@@ -55,11 +55,29 @@ router.post('/', authenticate, [
   }
 
   // ── Calculer commission (§3.7 : taux vient de la DB)
-  const calc = await commissionService.calculate(
-    Number(listing.price),
-    nights,
-    listing.partners?.id
-  );
+  let calc;
+  try {
+    calc = await commissionService.calculate(
+      Number(listing.price),
+      nights,
+      listing.partners?.id
+    );
+  } catch(e) {
+    console.log('Commission calc error:', e.message);
+    // Fallback si commissionService plante
+    const rate = 17;
+    const subtotal = Number(listing.price) * nights;
+    calc = {
+      pricePerNight: Number(listing.price),
+      nights,
+      subtotal,
+      serviceFee: Math.round(subtotal * 0.05),
+      total: Math.round(subtotal * 1.05),
+      commission: Math.round(subtotal * rate / 100),
+      commissionRate: rate,
+      partnerGets: Math.round(subtotal * (1 - rate / 100)),
+    };
+  }
 
   // Créer la réservation
   const { data: booking, error } = await db.from('bookings').insert({
@@ -76,11 +94,14 @@ router.post('/', authenticate, [
     commission:      calc.commission,
     partner_gets:    calc.partnerGets,
     status:          'pending',
-    payment_method,
-    notes,
+    payment_method:  payment_method || 'pending',
+    notes:           notes || '',
   }).select().single();
 
-  if (error) throw new Error(error.message);
+  if (error) {
+    console.log('Booking insert error:', error.message, error.details);
+    throw new Error(error.message);
+  }
 
   // Enregistrer commission et notifier (non bloquant)
   try {
