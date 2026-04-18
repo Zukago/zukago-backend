@@ -82,18 +82,32 @@ router.post('/', authenticate, [
 
   if (error) throw new Error(error.message);
 
-  // Enregistrer commission en DB
-  await commissionService.record(booking.id, listing.partners.id, calc.commission, calc.commissionRate);
+  // Enregistrer commission et notifier (non bloquant)
+  try {
+    await commissionService.record(booking.id, listing.partners?.id, calc.commission, calc.commissionRate);
+  } catch(e) { console.log('Commission record error:', e.message); }
 
-  // Récupérer infos user et partenaire pour emails
-  const { data: user }    = await db.from('users').select('name, email').eq('id', req.user.id).single();
-  const { data: partner } = await db.from('users').select('name, email, whatsapp').eq('id', listing.partners.user_id).single();
+  // Notification au partenaire dans l'app
+  try {
+    await db.from('notifications').insert({
+      user_id: listing.partners?.user_id,
+      title: '📋 Nouvelle réservation !',
+      body: `${req.user.name || 'Un client'} a réservé "${listing.title}" du ${start_date} au ${end_date}`,
+      type: 'booking',
+    });
+  } catch(e) { console.log('Notif error:', e.message); }
 
-  // Emails automatiques
-  await Promise.all([
-    emailService.sendBookingConfirmation(user, booking, listing),
-    emailService.sendNewBookingToPartner(partner, booking, listing, user),
-  ]);
+  // Emails (non bloquants)
+  try {
+    const { data: user }    = await db.from('users').select('name, email').eq('id', req.user.id).single();
+    const { data: partner } = await db.from('users').select('name, email').eq('id', listing.partners?.user_id).single();
+    if (user && partner) {
+      await Promise.all([
+        emailService.sendBookingConfirmation(user, booking, listing).catch(()=>{}),
+        emailService.sendNewBookingToPartner(partner, booking, listing, user).catch(()=>{}),
+      ]);
+    }
+  } catch(e) { console.log('Email error:', e.message); }
 
   res.status(201).json({
     booking,
