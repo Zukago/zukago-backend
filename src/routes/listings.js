@@ -196,14 +196,39 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
 
 // ─── DELETE /api/listings/:id — Supprimer ─────────────────────────────────────
 router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
-  const { data: listing } = await db.from('listings').select('partner_id, partners(user_id)').eq('id', req.params.id).single();
+  const { data: listing } = await db.from('listings')
+    .select('id, partner_id, partners(user_id)')
+    .eq('id', req.params.id).single();
+
   if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
 
   const isOwner = listing.partners?.user_id === req.user.id;
-  if (!isOwner && req.user.role !== 'admin') return res.status(403).json({ error: 'Non autorisé' });
+  if (!isOwner && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Non autorisé' });
+  }
 
-  await db.from('listings').update({ status: 'inactive' }).eq('id', req.params.id);
-  res.json({ message: 'Annonce désactivée' });
+  // 1. Récupérer et supprimer les photos Cloudinary
+  const { data: photos } = await db.from('listing_photos')
+    .select('id, public_id').eq('listing_id', req.params.id);
+
+  if (photos?.length) {
+    await Promise.all(
+      photos.map(p => p.public_id ? deleteImage(p.public_id).catch(() => {}) : Promise.resolve())
+    );
+    await db.from('listing_photos').delete().eq('listing_id', req.params.id);
+  }
+
+  // 2. Supprimer les données liées
+  await Promise.all([
+    db.from('listing_amenities').delete().eq('listing_id', req.params.id),
+    db.from('bookings').update({ status: 'cancelled' }).eq('listing_id', req.params.id),
+    db.from('favorites').delete().eq('listing_id', req.params.id),
+  ]);
+
+  // 3. Supprimer l'annonce
+  await db.from('listings').delete().eq('id', req.params.id);
+
+  res.json({ message: 'Annonce supprimée définitivement', deleted: true });
 }));
 
 
