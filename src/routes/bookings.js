@@ -17,7 +17,7 @@ router.post('/', authenticate, [
   body('listing_id').isUUID(),
   body('start_date').isDate(),
   body('end_date').isDate(),
-  body('payment_method').isIn(['mtn', 'orange', 'card', 'paypal']),
+  body('payment_method').optional().isString(),
 ], asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
