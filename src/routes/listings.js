@@ -83,6 +83,27 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
   res.json({ listing: { ...listing, rating, reviews_count: listing.reviews?.length, isFavorite } });
 }));
 
+
+// ─── GET /api/listings/:id/availability — Dates occupées
+router.get('/:id/availability', asyncHandler(async (req, res) => {
+  const { data: bookings } = await db.from('bookings')
+    .select('start_date, end_date')
+    .eq('listing_id', req.params.id)
+    .in('status', ['confirmed', 'pending']);
+
+  // Construire la liste de toutes les dates occupées
+  const bookedDates = [];
+  (bookings || []).forEach(b => {
+    const start = new Date(b.start_date);
+    const end   = new Date(b.end_date);
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      bookedDates.push(d.toISOString().split('T')[0]);
+    }
+  });
+
+  res.json({ bookedDates: [...new Set(bookedDates)] });
+}));
+
 // ─── POST /api/listings — Créer annonce (partenaire) ─────────────────────────
 router.post('/', authenticate, requirePartner, [
   body('type').isIn(['apt', 'hotel', 'car', 'driver']),
@@ -183,6 +204,27 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
 
   await db.from('listings').update({ status: 'inactive' }).eq('id', req.params.id);
   res.json({ message: 'Annonce désactivée' });
+}));
+
+
+// ─── GET /api/listings/:id/availability — Dates occupées
+router.get('/:id/availability', asyncHandler(async (req, res) => {
+  const { data: bookings } = await db.from('bookings')
+    .select('start_date, end_date')
+    .eq('listing_id', req.params.id)
+    .in('status', ['confirmed', 'pending']);
+
+  // Construire la liste de toutes les dates occupées
+  const bookedDates = [];
+  (bookings || []).forEach(b => {
+    const start = new Date(b.start_date);
+    const end   = new Date(b.end_date);
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      bookedDates.push(d.toISOString().split('T')[0]);
+    }
+  });
+
+  res.json({ bookedDates: [...new Set(bookedDates)] });
 }));
 
 // ─── POST /api/listings/:id/favorite — Ajouter/retirer favori ────────────────

@@ -17,43 +17,52 @@ router.get('/me', authenticate, asyncHandler(async (req, res) => {
 
 // ─── GET /api/partners/stats — Stats du partenaire ───────────────────────────
 router.get('/stats', authenticate, requirePartner, asyncHandler(async (req, res) => {
-  const { data: partner } = await db.from('partners').select('id, solde').eq('user_id', req.user.id).single();
+  let { data: partner } = await db.from('partners').select('id, solde').eq('user_id', req.user.id).single();
+  if (!partner) {
+    const { data: np } = await db.from('partners')
+      .insert({ user_id: req.user.id, type: 'proprietaire', status: 'approved' })
+      .select().single();
+    partner = np;
+  }
+  if (!partner) return res.json({});
+
+  const now = new Date();
+  const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
 
   const [
     { count: totalListings },
     { count: activeListings },
     { count: totalBookings },
     { count: confirmedBookings },
+    { data: monthBookings },
+    { data: allBookings },
   ] = await Promise.all([
     db.from('listings').select('*', { count: 'exact', head: true }).eq('partner_id', partner.id),
     db.from('listings').select('*', { count: 'exact', head: true }).eq('partner_id', partner.id).eq('status', 'active'),
     db.from('bookings').select('*', { count: 'exact', head: true })
-      .in('listing_id', (await db.from('listings').select('id').eq('partner_id', partner.id)).data?.map(l => l.id) || []),
+      .in('listing_id', (await db.from('listings').select('id').eq('partner_id', partner.id)).data?.map(l=>l.id)||[]),
     db.from('bookings').select('*', { count: 'exact', head: true }).eq('status', 'confirmed')
-      .in('listing_id', (await db.from('listings').select('id').eq('partner_id', partner.id)).data?.map(l => l.id) || []),
+      .in('listing_id', (await db.from('listings').select('id').eq('partner_id', partner.id)).data?.map(l=>l.id)||[]),
+    db.from('bookings').select('partner_gets').gte('created_at', firstOfMonth)
+      .in('listing_id', (await db.from('listings').select('id').eq('partner_id', partner.id)).data?.map(l=>l.id)||[]),
+    db.from('bookings').select('partner_gets')
+      .in('listing_id', (await db.from('listings').select('id').eq('partner_id', partner.id)).data?.map(l=>l.id)||[]),
   ]);
 
-  // Revenus
-  const { data: commissions } = await db.from('commissions')
-    .select('amount, status, created_at').eq('partner_id', partner.id);
-
-  const totalRevenu = commissions?.reduce((sum, c) => sum + Number(c.amount), 0) || 0;
-
-  // Ce mois
-  const firstOfMonth = new Date(); firstOfMonth.setDate(1); firstOfMonth.setHours(0,0,0,0);
-  const revenuMois = commissions?.filter(c => new Date(c.created_at) >= firstOfMonth)
-    .reduce((sum, c) => sum + Number(c.amount), 0) || 0;
+  const revenuMois = (monthBookings || []).reduce((s, b) => s + (b.partner_gets || 0), 0);
+  const totalRevenu = (allBookings || []).reduce((s, b) => s + (b.partner_gets || 0), 0);
 
   res.json({
-    solde: Number(partner.solde),
-    totalListings,
-    activeListings,
-    totalBookings,
-    confirmedBookings,
-    totalRevenu,
+    totalListings:     totalListings || 0,
+    activeListings:    activeListings || 0,
+    totalBookings:     totalBookings || 0,
+    confirmedBookings: confirmedBookings || 0,
     revenuMois,
+    totalRevenu,
+    solde: partner.solde || 0,
   });
 }));
+
 
 // ─── GET /api/partners/listings — Mes annonces ───────────────────────────────
 router.get('/listings', authenticate, requirePartner, asyncHandler(async (req, res) => {
@@ -69,14 +78,22 @@ router.get('/listings', authenticate, requirePartner, asyncHandler(async (req, r
 
 // ─── GET /api/partners/bookings — Mes réservations ───────────────────────────
 router.get('/bookings', authenticate, requirePartner, asyncHandler(async (req, res) => {
-  const { data: partner } = await db.from('partners').select('id').eq('user_id', req.user.id).single();
+  let { data: partner } = await db.from('partners').select('id').eq('user_id', req.user.id).single();
+  if (!partner) {
+    const { data: np } = await db.from('partners')
+      .insert({ user_id: req.user.id, type: 'proprietaire', status: 'approved' })
+      .select().single();
+    partner = np;
+  }
+  if (!partner) return res.json({ bookings: [] });
+
   const { data: myListings } = await db.from('listings').select('id').eq('partner_id', partner.id);
-  const listingIds = myListings?.map(l => l.id) || [];
+  const listingIds = (myListings || []).map(l => l.id);
 
   if (!listingIds.length) return res.json({ bookings: [] });
 
   const { data: bookings } = await db.from('bookings')
-    .select('*, listings(title), users(name, avatar, email)')
+    .select('*, listings(id, title, type, city_code, price, emoji), users(name, email)')
     .in('listing_id', listingIds)
     .order('created_at', { ascending: false });
 
