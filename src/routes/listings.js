@@ -3,6 +3,7 @@ const { body, query, validationResult } = require('express-validator');
 const db = require('../config/database');
 const { authenticate, requireAdmin, requirePartner, optionalAuth } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
+const { deleteImage } = require('../config/cloudinary');
 
 const router = express.Router();
 
