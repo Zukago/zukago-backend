@@ -16,7 +16,7 @@ router.get('/me', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // ─── GET /api/partners/stats — Stats du partenaire ───────────────────────────
-router.get('/stats', authenticate, requirePartner, asyncHandler(async (req, res) => {
+router.get('/stats', authenticate, asyncHandler(async (req, res) => {
   let { data: partner } = await db.from('partners').select('id, solde').eq('user_id', req.user.id).single();
   if (!partner) {
     const { data: np } = await db.from('partners')
@@ -65,8 +65,15 @@ router.get('/stats', authenticate, requirePartner, asyncHandler(async (req, res)
 
 
 // ─── GET /api/partners/listings — Mes annonces ───────────────────────────────
-router.get('/listings', authenticate, requirePartner, asyncHandler(async (req, res) => {
-  const { data: partner } = await db.from('partners').select('id').eq('user_id', req.user.id).single();
+router.get('/listings', authenticate, asyncHandler(async (req, res) => {
+  let { data: partner } = await db.from('partners').select('id').eq('user_id', req.user.id).single();
+  if (!partner) {
+    const { data: np } = await db.from('partners')
+      .insert({ user_id: req.user.id, type: 'proprietaire', status: 'approved' })
+      .select().single();
+    partner = np;
+  }
+  if (!partner) return res.json({ listings: [] });
 
   const { data: listings } = await db.from('listings')
     .select('*, listing_photos(url, is_main)')
@@ -77,7 +84,8 @@ router.get('/listings', authenticate, requirePartner, asyncHandler(async (req, r
 }));
 
 // ─── GET /api/partners/bookings — Mes réservations ───────────────────────────
-router.get('/bookings', authenticate, requirePartner, asyncHandler(async (req, res) => {
+router.get('/bookings', authenticate, asyncHandler(async (req, res) => {
+  // Auto-créer partenaire si besoin (ne pas bloquer avec requirePartner)
   let { data: partner } = await db.from('partners').select('id').eq('user_id', req.user.id).single();
   if (!partner) {
     const { data: np } = await db.from('partners')
@@ -87,15 +95,29 @@ router.get('/bookings', authenticate, requirePartner, asyncHandler(async (req, r
   }
   if (!partner) return res.json({ bookings: [] });
 
-  const { data: myListings } = await db.from('listings').select('id').eq('partner_id', partner.id);
-  const listingIds = (myListings || []).map(l => l.id);
+  // Récupérer tous les listing_ids de ce partenaire (tous statuts, pas seulement active)
+  const { data: myListings } = await db.from('listings')
+    .select('id')
+    .eq('partner_id', partner.id);
 
+  const listingIds = (myListings || []).map(l => l.id);
   if (!listingIds.length) return res.json({ bookings: [] });
 
-  const { data: bookings } = await db.from('bookings')
-    .select('*, listings(id, title, type, city_code, price, emoji), users(name, email)')
+  // Récupérer les réservations — TOUS les statuts visibles (pending + confirmed + cancelled)
+  const { data: bookings, error } = await db.from('bookings')
+    .select(`
+      *,
+      listings(id, title, type, city_code, price, emoji, listing_photos(url, is_main)),
+      users(id, name, email, phone, avatar)
+    `)
     .in('listing_id', listingIds)
+    .in('status', ['pending', 'confirmed', 'cancelled'])
     .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('Partner bookings error:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
 
   res.json({ bookings: bookings || [] });
 }));
