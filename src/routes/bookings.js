@@ -43,12 +43,14 @@ router.post('/', authenticate, [
     return res.status(400).json({ error: `Séjour minimum : ${listing.min_nights} nuit(s)` });
   }
 
-  // Vérifier disponibilité (pas de chevauchement)
+  // Vérifier disponibilité — overlap correct :
+  // booking existant chevauche si : son start <= notre end ET son end >= notre start
   const { data: conflicts } = await db.from('bookings')
     .select('id')
     .eq('listing_id', listing_id)
     .in('status', ['confirmed', 'pending'])
-    .or(`start_date.lte.${end_date},end_date.gte.${start_date}`);
+    .lte('start_date', end_date)   // booking commence avant ou le jour du départ
+    .gte('end_date', start_date);  // booking finit après ou le jour d'arrivée
 
   if (conflicts?.length) {
     return res.status(409).json({ error: 'Ces dates ne sont pas disponibles' });
