@@ -204,4 +204,50 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
   res.json({ message: 'Réservation annulée' });
 }));
 
+
+// ─── PATCH /api/bookings/:id/confirm-partner — Partenaire confirme réservation
+router.patch('/:id/confirm-partner', authenticate, asyncHandler(async (req, res) => {
+  const { data: booking } = await db.from('bookings')
+    .select('*, listings(partner_id, partners(user_id))')
+    .eq('id', req.params.id).single();
+
+  if (!booking) return res.status(404).json({ error: 'Réservation introuvable' });
+
+  await db.from('bookings').update({ status: 'confirmed' }).eq('id', req.params.id);
+
+  // Notifier le client
+  try {
+    await db.from('notifications').insert({
+      user_id: booking.user_id,
+      title: '✅ Réservation confirmée !',
+      body: `Votre réservation a été confirmée par le propriétaire.`,
+      type: 'booking',
+    });
+  } catch(e) {}
+
+  res.json({ message: 'Réservation confirmée' });
+}));
+
+// ─── PATCH /api/bookings/:id/cancel — Annuler réservation
+router.patch('/:id/cancel', authenticate, asyncHandler(async (req, res) => {
+  const { reason } = req.body;
+  const { data: booking } = await db.from('bookings').select('user_id').eq('id', req.params.id).single();
+
+  if (!booking) return res.status(404).json({ error: 'Réservation introuvable' });
+
+  await db.from('bookings').update({ status: 'cancelled' }).eq('id', req.params.id);
+
+  // Notifier le client
+  try {
+    await db.from('notifications').insert({
+      user_id: booking.user_id,
+      title: '❌ Réservation annulée',
+      body: reason ? `Raison: ${reason}` : 'Votre réservation a été annulée.',
+      type: 'info',
+    });
+  } catch(e) {}
+
+  res.json({ message: 'Réservation annulée' });
+}));
+
 module.exports = router;
