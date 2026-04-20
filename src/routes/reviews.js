@@ -1,72 +1,111 @@
+/**
+ * ZUKAGO — routes/reviews.js
+ * Système d'avis — POST + GET
+ */
+
 const express = require('express');
-const { body, validationResult } = require('express-validator');
-const db = require('../config/database');
-const { authenticate, requireAdmin, optionalAuth } = require('../middleware/auth');
-const { asyncHandler } = require('../middleware/errorHandler');
+const db      = require('../config/database');
+const { authenticate, optionalAuth } = require('../middleware/auth');
+const { asyncHandler }               = require('../middleware/errorHandler');
 
 const router = express.Router();
 
-// ─── GET /api/reviews/listing/:id — Avis d'une annonce ───────────────────────
-router.get('/listing/:id', asyncHandler(async (req, res) => {
-  const { data: reviews } = await db.from('reviews')
+// ─── GET /api/reviews/listing/:id — Avis d'une annonce ──────────────────────
+router.get('/listing/:id', optionalAuth, asyncHandler(async (req, res) => {
+  const { data: reviews, error } = await db.from('reviews')
     .select('*, users(name, avatar)')
     .eq('listing_id', req.params.id)
+    .eq('visible', true)
     .order('created_at', { ascending: false });
 
-  const avg = reviews?.length
-    ? (reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length).toFixed(1)
+  if (error) return res.status(500).json({ error: error.message });
+
+  const list = reviews || [];
+  const average = list.length
+    ? (list.reduce((s, r) => s + r.rating, 0) / list.length).toFixed(1)
     : null;
 
-  res.json({ reviews: reviews || [], average: avg, count: reviews?.length || 0 });
+  res.json({ reviews: list, average, count: list.length });
 }));
 
-// ─── POST /api/reviews — Publier un avis ─────────────────────────────────────
-router.post('/', authenticate, [
-  body('listing_id').isUUID(),
-  body('rating').isInt({ min: 1, max: 5 }),
-  body('comment').optional().trim().isLength({ max: 500 }),
-], asyncHandler(async (req, res) => {
-  const errors = validationResult(req);
-  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+// ─── POST /api/reviews — Créer un avis ───────────────────────────────────────
+router.post('/', authenticate, asyncHandler(async (req, res) => {
+  const { listing_id, rating, comment } = req.body;
 
-  const { listing_id, rating, comment, booking_id } = req.body;
+  // Validation
+  if (!listing_id) return res.status(400).json({ error: 'listing_id requis' });
+  if (!rating || rating < 1 || rating > 5)
+    return res.status(400).json({ error: 'Note invalide (1-5)' });
+  if (!comment || comment.trim().length < 10)
+    return res.status(400).json({ error: 'Commentaire trop court (min. 10 caractères)' });
 
-  // Vérifier si déjà noté
-  const { data: existing } = await db.from('reviews')
-    .select('id').eq('listing_id', listing_id).eq('user_id', req.user.id).single();
-  if (existing) return res.status(409).json({ error: 'Vous avez déjà noté cette annonce' });
+  // Vérifier que l'utilisateur a une réservation confirmée pour cette annonce
+  const { data: booking } = await db.from('bookings')
+    .select('id')
+    .eq('listing_id', listing_id)
+    .eq('user_id', req.user.id)
+    .in('status', ['confirmed'])
+    .limit(1)
+    .single();
 
-  // Vérifier si lié à une vraie réservation (avis vérifié)
-  let verified = false;
-  if (booking_id) {
-    const { data: booking } = await db.from('bookings')
-      .select('id').eq('id', booking_id).eq('user_id', req.user.id)
-      .eq('listing_id', listing_id).eq('status', 'completed').single();
-    verified = !!booking;
+  if (!booking) {
+    return res.status(403).json({
+      error: 'Vous devez avoir une réservation confirmée pour laisser un avis.'
+    });
   }
 
+  // Vérifier qu'il n'a pas déjà laissé un avis
+  const { data: existing } = await db.from('reviews')
+    .select('id')
+    .eq('listing_id', listing_id)
+    .eq('user_id', req.user.id)
+    .single();
+
+  if (existing) {
+    return res.status(409).json({ error: 'Vous avez déjà laissé un avis pour cette annonce.' });
+  }
+
+  // Insérer l'avis
   const { data: review, error } = await db.from('reviews').insert({
-    listing_id, rating, comment,
-    user_id: req.user.id,
-    booking_id: booking_id || null,
-    verified,
+    listing_id,
+    user_id:  req.user.id,
+    rating:   Number(rating),
+    comment:  comment.trim(),
+    visible:  true,
+    verified: true, // réservation vérifiée ci-dessus
   }).select('*, users(name, avatar)').single();
 
-  if (error) throw new Error(error.message);
-  res.status(201).json({ review });
-}));
-
-// ─── DELETE /api/reviews/:id — Supprimer un avis ─────────────────────────────
-router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
-  const { data: review } = await db.from('reviews').select('user_id').eq('id', req.params.id).single();
-  if (!review) return res.status(404).json({ error: 'Avis introuvable' });
-
-  if (review.user_id !== req.user.id && req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Non autorisé' });
+  if (error) {
+    console.error('Review insert error:', error.message);
+    return res.status(500).json({ error: error.message });
   }
 
-  await db.from('reviews').delete().eq('id', req.params.id);
-  res.json({ message: 'Avis supprimé' });
+  // Notifier le partenaire
+  try {
+    const { data: listing } = await db.from('listings')
+      .select('title, partners(user_id)')
+      .eq('id', listing_id)
+      .single();
+
+    if (listing?.partners?.user_id) {
+      await db.from('notifications').insert({
+        user_id: listing.partners.user_id,
+        title:   '⭐ Nouvel avis reçu !',
+        body:    `${req.user.name} a laissé un avis ${rating}/5 sur "${listing.title}"`,
+        type:    'review',
+      });
+    }
+  } catch (e) { console.log('Review notif error:', e.message); }
+
+  res.status(201).json({ review, message: 'Avis publié avec succès.' });
+}));
+
+// ─── DELETE /api/reviews/:id — Supprimer (admin) ─────────────────────────────
+router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
+  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Non autorisé' });
+
+  await db.from('reviews').update({ visible: false }).eq('id', req.params.id);
+  res.json({ message: 'Avis masqué.' });
 }));
 
 module.exports = router;
