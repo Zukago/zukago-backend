@@ -198,14 +198,57 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
 // ─── DELETE /api/listings/:id — Supprimer ─────────────────────────────────────
 router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
   const { data: listing } = await db.from('listings')
-    .select('id, partner_id, partners(user_id)')
+    .select('id, title, partner_id, partners(user_id)')
     .eq('id', req.params.id).single();
 
   if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
 
   const isOwner = listing.partners?.user_id === req.user.id;
-  if (!isOwner && req.user.role !== 'admin') {
-    return res.status(403).json({ error: 'Non autorisé' });
+  const isAdmin = req.user.role === 'admin';
+  if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Non autorisé' });
+
+  // ── Vérifier les réservations actives
+  const { data: activeBookings } = await db.from('bookings')
+    .select('id, status')
+    .eq('listing_id', req.params.id)
+    .in('status', ['confirmed', 'pending']);
+
+  const confirmedBookings = (activeBookings || []).filter(b => b.status === 'confirmed');
+
+  if (confirmedBookings.length > 0) {
+    // Réservations confirmées → seul l'admin peut forcer la suppression
+    if (!isAdmin) {
+      return res.status(409).json({
+        error: 'Suppression impossible',
+        reason: 'confirmed_bookings',
+        count: confirmedBookings.length,
+        message: `Cette annonce a ${confirmedBookings.length} réservation(s) confirmée(s). Contactez l'administrateur ZUKAGO pour procéder à la suppression.`,
+      });
+    }
+  }
+
+  // ── Annuler les réservations en attente
+  const pendingBookings = (activeBookings || []).filter(b => b.status === 'pending');
+  if (pendingBookings.length > 0) {
+    await db.from('bookings')
+      .update({ status: 'cancelled' })
+      .in('id', pendingBookings.map(b => b.id));
+
+    // Notifier les clients dont la réservation est annulée
+    const { data: pendingDetails } = await db.from('bookings')
+      .select('user_id')
+      .in('id', pendingBookings.map(b => b.id));
+
+    if (pendingDetails?.length) {
+      await db.from('notifications').insert(
+        pendingDetails.map(b => ({
+          user_id: b.user_id,
+          title: 'Réservation annulée',
+          body: `Votre réservation pour "${listing.title}" a été annulée car l'annonce a été supprimée.`,
+          type: 'info',
+        }))
+      );
+    }
   }
 
   // 1. Récupérer et supprimer les photos Cloudinary
@@ -214,21 +257,24 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
 
   if (photos?.length) {
     await Promise.all(
-      photos.map(p => p.public_id ? deleteImage(p.public_id).catch(() => {}) : Promise.resolve())
+      photos.map(p => p.public_id ? deleteImage(p.public_id).catch(e => console.log('Cloudinary delete error:', e.message)) : Promise.resolve())
     );
     await db.from('listing_photos').delete().eq('listing_id', req.params.id);
   }
 
-  // 2. Supprimer les données liées
+  // 2. Supprimer toutes les données liées
   await Promise.all([
     db.from('listing_amenities').delete().eq('listing_id', req.params.id),
-    db.from('bookings').update({ status: 'cancelled' }).eq('listing_id', req.params.id),
+    db.from('reviews').delete().eq('listing_id', req.params.id),
     db.from('favorites').delete().eq('listing_id', req.params.id),
+    db.from('bookings').update({ status: 'cancelled' }).eq('listing_id', req.params.id),
   ]);
 
   // 3. Supprimer l'annonce
-  await db.from('listings').delete().eq('id', req.params.id);
+  const { error } = await db.from('listings').delete().eq('id', req.params.id);
+  if (error) throw new Error(error.message);
 
+  console.log(`✅ Listing ${req.params.id} supprimé par ${req.user.id}`);
   res.json({ message: 'Annonce supprimée définitivement', deleted: true });
 }));
 
