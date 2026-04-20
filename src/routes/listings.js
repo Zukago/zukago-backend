@@ -225,6 +225,45 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
         message: `Cette annonce a ${confirmedBookings.length} réservation(s) confirmée(s). Contactez l'administrateur ZUKAGO pour procéder à la suppression.`,
       });
     }
+
+    // Admin force-delete → annuler les bookings confirmés + notifier clients et partenaire
+    const { data: confirmedDetails } = await db.from('bookings')
+      .select('id, user_id')
+      .eq('listing_id', req.params.id)
+      .eq('status', 'confirmed');
+
+    if (confirmedDetails?.length) {
+      // Annuler les réservations confirmées
+      await db.from('bookings')
+        .update({ status: 'cancelled' })
+        .in('id', confirmedDetails.map(b => b.id));
+
+      // Notifier chaque client
+      await db.from('notifications').insert(
+        confirmedDetails.map(b => ({
+          user_id: b.user_id,
+          title:   'Réservation annulée',
+          body:    `Votre réservation confirmée pour "${listing.title}" a été annulée par l'administration ZUKAGO. Nous nous excusons pour ce désagrément.`,
+          type:    'info',
+        }))
+      );
+    }
+
+    // Notifier le partenaire
+    try {
+      const { data: partnerRow } = await db.from('partners')
+        .select('user_id')
+        .eq('id', listing.partner_id)
+        .single();
+      if (partnerRow?.user_id) {
+        await db.from('notifications').insert({
+          user_id: partnerRow.user_id,
+          title:   'Annonce supprimée par l\'administration',
+          body:    `Votre annonce "${listing.title}" a été supprimée par l'équipe ZUKAGO. ${confirmedBookings.length} réservation(s) confirmée(s) ont été annulées et les clients notifiés.`,
+          type:    'info',
+        });
+      }
+    } catch (e) { console.log('Partner notif error:', e.message); }
   }
 
   // ── Annuler les réservations en attente
