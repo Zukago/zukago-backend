@@ -68,7 +68,7 @@ router.patch('/partners/:id/reject', asyncHandler(async (req, res) => {
     await db.from('notifications').insert({
       user_id: partner.user_id,
       title: 'Demande partenaire refusée',
-      body: `Votre demande partenaire n'a pas été approuvée. ${message ? 'Raison : ' + message : 'Contactez le support pour plus d'informations.'}`,
+      body: `Votre demande partenaire n'a pas ete approuvee. ${message ? 'Raison : ' + message : 'Contactez le support.'}`,
       type: 'info',
     });
   } catch(e) { console.log('Notif partner reject error:', e.message); }
