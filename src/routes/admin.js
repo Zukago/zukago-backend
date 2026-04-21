@@ -438,4 +438,100 @@ router.post('/stats/update-today', asyncHandler(async (req, res) => {
   res.json({ message: `Stats du ${statsService.today()} mises à jour` });
 }));
 
+
+// ─── GESTION UTILISATEURS ─────────────────────────────────────────────────────
+
+// GET /api/admin/users — Liste tous les utilisateurs
+router.get('/users', asyncHandler(async (req, res) => {
+  const { page = 1, limit = 20, search = '', role = '' } = req.query;
+  const offset = (page - 1) * limit;
+
+  let query = db.from('users')
+    .select('id, name, email, role, active, verified, created_at, avatar, provider', { count: 'exact' })
+    .order('created_at', { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (search) {
+    query = query.or(`name.ilike.%${search}%,email.ilike.%${search}%`);
+  }
+  if (role) {
+    query = query.eq('role', role);
+  }
+
+  const { data: users, count, error } = await query;
+  if (error) return res.status(500).json({ error: error.message });
+
+  res.json({ users: users || [], total: count || 0, page: Number(page), limit: Number(limit) });
+}));
+
+// PATCH /api/admin/users/:id/suspend — Suspendre / réactiver un compte
+router.patch('/users/:id/suspend', asyncHandler(async (req, res) => {
+  const { active } = req.body; // true = réactiver, false = suspendre
+
+  const { data: user } = await db.from('users').select('name, email').eq('id', req.params.id).single();
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+
+  // Empêcher de suspendre un admin
+  const { data: target } = await db.from('users').select('role').eq('id', req.params.id).single();
+  if (target?.role === 'admin') return res.status(403).json({ error: 'Impossible de suspendre un admin' });
+
+  await db.from('users').update({ active }).eq('id', req.params.id);
+
+  // Notif in-app
+  await db.from('notifications').insert({
+    user_id: req.params.id,
+    title: active ? 'Compte réactivé' : 'Compte suspendu',
+    body:  active ? 'Votre compte ZUKAGO a été réactivé.' : 'Votre compte a été suspendu. Contactez le support.',
+    type:  'info',
+  }).catch(() => {});
+
+  res.json({ message: `Compte ${user.name} ${active ? 'réactivé' : 'suspendu'}` });
+}));
+
+// DELETE /api/admin/users/:id — Supprimer un compte + cascade
+router.delete('/users/:id', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  const { data: user } = await db.from('users').select('name, email, role').eq('id', id).single();
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  if (user.role === 'admin') return res.status(403).json({ error: 'Impossible de supprimer un admin' });
+
+  // Cascade propre dans l'ordre des dépendances FK
+  try {
+    // 1. Supprimer notifications
+    await db.from('notifications').delete().eq('user_id', id);
+
+    // 2. Supprimer favoris
+    await db.from('favorites').delete().eq('user_id', id);
+
+    // 3. Supprimer push tokens
+    await db.from('push_tokens').delete().eq('user_id', id);
+
+    // 4. Supprimer avis
+    await db.from('reviews').delete().eq('user_id', id);
+
+    // 5. Annuler les réservations en cours
+    await db.from('bookings')
+      .update({ status: 'cancelled', cancel_reason: 'Compte supprimé par admin' })
+      .eq('user_id', id)
+      .in('status', ['pending', 'confirmed']);
+
+    // 6. Si partenaire — désactiver les annonces + supprimer données partenaire
+    const { data: partner } = await db.from('partners').select('id').eq('user_id', id).single();
+    if (partner) {
+      await db.from('listings').update({ status: 'deleted' }).eq('partner_id', partner.id);
+      await db.from('partners').delete().eq('user_id', id);
+    }
+
+    // 7. Supprimer l'utilisateur
+    await db.from('users').delete().eq('id', id);
+
+  } catch (e) {
+    console.log('Delete user cascade error:', e.message);
+    return res.status(500).json({ error: 'Erreur lors de la suppression: ' + e.message });
+  }
+
+  res.json({ message: `Compte ${user.name} (${user.email}) supprimé définitivement` });
+}));
+
 module.exports = router;
