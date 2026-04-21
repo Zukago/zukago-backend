@@ -111,7 +111,7 @@ router.post('/', authenticate, requirePartner, [
   body('title').trim().isLength({ min: 2, max: 100 }),
   body('description').trim().isLength({ min: 2 }),
   body('price').isNumeric(),
-  body('city_code').notEmpty(),
+  body('city_code').optional(),
   body('quartier').optional(),
 ], asyncHandler(async (req, res) => {
   const errors = validationResult(req);
@@ -136,13 +136,52 @@ router.post('/', authenticate, requirePartner, [
     partnerId = partner.id;
   }
 
-  const { type, title, description, sub_type, city_code, quartier, address,
+  const { type, title, description, sub_type, city_code, city_name, quartier, address,
           price, price_weekend, unit, min_nights, caution, whatsapp, contact_email, amenities } = req.body;
+
+  // ✅ Auto-création ville si elle n'existe pas dans cities — §3.7
+  let validCityCode = city_code || null;
+  const cityLabel   = city_name || city_code || '';
+
+  if (cityLabel) {
+    // Générer un code propre depuis le nom : "Bafang" → "bafang", "Dakar" → "dakar"
+    const generatedCode = cityLabel
+      .toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // enlever accents
+      .replace(/[^a-z0-9]/g, '_')
+      .substring(0, 20);
+
+    // Vérifier si la ville existe déjà
+    const { data: existing } = await db.from('cities')
+      .select('code').eq('code', generatedCode).single();
+
+    if (existing) {
+      validCityCode = generatedCode;
+    } else {
+      // Créer la ville automatiquement
+      try {
+        await db.from('cities').insert({
+          code:       generatedCode,
+          label:      cityLabel,
+          active:     true,
+          sort_order: 999,
+        });
+        validCityCode = generatedCode;
+      } catch(e) {
+        // Si conflit (race condition) — réessayer avec select
+        const { data: retry } = await db.from('cities')
+          .select('code').eq('label', cityLabel).single();
+        validCityCode = retry?.code || null;
+      }
+    }
+  }
 
   const { data: listing, error } = await db.from('listings').insert({
     partner_id: partnerId,
     type, title, description, sub_type,
-    city_code, quartier, address,
+    city_code: validCityCode,
+    quartier:  quartier || '',
+    address,
     price, price_weekend: price_weekend || null,
     unit: unit || (type === 'car' || type === 'driver' ? 'jour' : 'nuit'),
     min_nights: min_nights || 1,
