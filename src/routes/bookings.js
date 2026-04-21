@@ -5,6 +5,7 @@ const db = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
 const commissionService = require('../services/commissionService');
+const statsService      = require('../services/statsService');
 const emailService = require('../services/emailService');
 
 const router = express.Router();
@@ -109,6 +110,9 @@ router.post('/', authenticate, [
   try {
     await commissionService.record(booking.id, listing.partners?.id, calc.commission, calc.commissionRate);
   } catch(e) { console.log('Commission record error:', e.message); }
+
+  // Mettre à jour stats_daily (non bloquant)
+  statsService.updateDay();
 
   // Notification au partenaire dans l'app
   try {

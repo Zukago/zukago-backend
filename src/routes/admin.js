@@ -4,6 +4,7 @@ const { authenticate, requireAdmin } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
 const emailService = require('../services/emailService');
 const commissionService = require('../services/commissionService');
+const statsService      = require('../services/statsService');
 
 const router = express.Router();
 router.use(authenticate, requireAdmin);
@@ -34,8 +35,21 @@ router.patch('/partners/:id/approve', asyncHandler(async (req, res) => {
 
   await db.from('users').update({ role: 'partner' }).eq('id', partner.user_id);
 
+  // Notification in-app
+  try {
+    await db.from('notifications').insert({
+      user_id: partner.user_id,
+      title: '🎉 Compte partenaire approuvé !',
+      body: `Bienvenue ${partner.users.name} ! Vous pouvez maintenant publier vos annonces sur ZUKAGO.`,
+      type: 'info',
+    });
+  } catch(e) { console.log('Notif partner approve error:', e.message); }
+
   // Email de confirmation
-  await emailService.sendPartnerApproved(partner.users);
+  try { await emailService.sendPartnerApproved(partner.users); } catch(e) {}
+
+  // Mettre à jour stats_daily
+  statsService.updateDay();
 
   res.json({ message: `Partenaire ${partner.users.name} approuvé` });
 }));
@@ -48,7 +62,18 @@ router.patch('/partners/:id/reject', asyncHandler(async (req, res) => {
   if (!partner) return res.status(404).json({ error: 'Partenaire introuvable' });
 
   await db.from('partners').update({ status: 'rejected', rejection_msg: message }).eq('id', req.params.id);
-  await emailService.sendPartnerRejected(partner.users, message);
+
+  // Notification in-app
+  try {
+    await db.from('notifications').insert({
+      user_id: partner.user_id,
+      title: 'Demande partenaire refusée',
+      body: `Votre demande partenaire n'a pas été approuvée. ${message ? 'Raison : ' + message : 'Contactez le support pour plus d'informations.'}`,
+      type: 'info',
+    });
+  } catch(e) { console.log('Notif partner reject error:', e.message); }
+
+  try { await emailService.sendPartnerRejected(partner.users, message); } catch(e) {}
 
   res.json({ message: 'Partenaire rejeté' });
 }));
@@ -100,12 +125,15 @@ router.patch('/listings/:id/approve', asyncHandler(async (req, res) => {
     if (partner) {
       await db.from('notifications').insert({
         user_id: partner.user_id,
-        title: 'Annonce approuvée ✅',
-        body: `Votre annonce "${listing.title}" est maintenant visible sur ZUKAGO !`,
-        type: 'booking',
+        title: 'Annonce approuvée',
+        body: `Votre annonce "${listing.title}" est maintenant visible sur ZUKAGO. Bonne chance !`,
+        type: 'info',
       });
     }
   } catch(e) { console.log('Notif error:', e.message); }
+
+  // Mettre à jour stats_daily
+  statsService.updateDay();
 
   res.json({ message: 'Annonce approuvée et publiée', listing });
 }));
@@ -172,7 +200,17 @@ router.patch('/withdrawals/:id/approve', asyncHandler(async (req, res) => {
     processed_at: new Date(),
   }).eq('id', req.params.id);
 
-  await emailService.sendWithdrawalApproved(withdrawal.partners.users, withdrawal);
+  // Notification in-app
+  try {
+    await db.from('notifications').insert({
+      user_id: withdrawal.partners?.user_id || null,
+      title: 'Virement effectué',
+      body: `Votre retrait de ${withdrawal.amount?.toLocaleString()} FCFA a été traité. Vous devriez le recevoir sous 24-48h.`,
+      type: 'payment',
+    });
+  } catch(e) { console.log('Notif withdrawal approve error:', e.message); }
+
+  try { await emailService.sendWithdrawalApproved(withdrawal.partners.users, withdrawal); } catch(e) {}
   res.json({ message: 'Retrait approuvé et virement effectué' });
 }));
 
@@ -271,10 +309,10 @@ router.post('/notifications/send', asyncHandler(async (req, res) => {
   // Créer notifications en DB
   const notifications = (users || []).map(u => ({
     user_id: u.id,
-    target,
     title,
     body,
-    type: 'info',
+    type: 'push',
+    read: false,
   }));
 
   if (notifications.length) {
@@ -323,6 +361,81 @@ router.get('/stats', asyncHandler(async (req, res) => {
     revenusMois: commStats.total,
     revenusTotal: allTimeStats.total,
   });
+}));
+
+
+// ─── STATS DÉTAILLÉES — lecture depuis stats_daily ───────────────────────────
+
+// GET /api/admin/stats/daily?year=2026&month=4
+// Retourne les données jour par jour pour un mois donné
+router.get('/stats/daily', asyncHandler(async (req, res) => {
+  const year  = parseInt(req.query.year)  || new Date().getFullYear();
+  const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+
+  const data = await statsService.getMonth(year, month);
+
+  // Formater pour le frontend : label = jour du mois ("01".."31")
+  const formatted = data.map(row => ({
+    date:             row.date,
+    label:            row.date.slice(8, 10), // "01".."31"
+    new_partners:     row.new_partners     || 0,
+    new_users:        row.new_users        || 0,
+    new_listings:     row.new_listings     || 0,
+    total_bookings:   row.total_bookings   || 0,
+    total_revenue:    Number(row.total_revenue    || 0),
+    total_commission: Number(row.total_commission || 0),
+  }));
+
+  // Totaux du mois
+  const totals = formatted.reduce((acc, row) => ({
+    new_partners:     acc.new_partners     + row.new_partners,
+    new_users:        acc.new_users        + row.new_users,
+    new_listings:     acc.new_listings     + row.new_listings,
+    total_bookings:   acc.total_bookings   + row.total_bookings,
+    total_revenue:    acc.total_revenue    + row.total_revenue,
+    total_commission: acc.total_commission + row.total_commission,
+  }), { new_partners: 0, new_users: 0, new_listings: 0, total_bookings: 0, total_revenue: 0, total_commission: 0 });
+
+  res.json({ data: formatted, totals, year, month });
+}));
+
+// GET /api/admin/stats/daily/year?year=2026
+// Retourne les données mois par mois pour une année (agrégé)
+router.get('/stats/daily/year', asyncHandler(async (req, res) => {
+  const year = parseInt(req.query.year) || new Date().getFullYear();
+  const rows = await statsService.getYear(year);
+
+  // Grouper par mois
+  const byMonth = {};
+  for (const row of rows) {
+    const m = row.date.slice(0, 7); // "2026-04"
+    if (!byMonth[m]) byMonth[m] = { label: m, new_partners: 0, new_users: 0, new_listings: 0, total_bookings: 0, total_revenue: 0, total_commission: 0 };
+    byMonth[m].new_partners     += row.new_partners     || 0;
+    byMonth[m].new_users        += row.new_users        || 0;
+    byMonth[m].new_listings     += row.new_listings     || 0;
+    byMonth[m].total_bookings   += row.total_bookings   || 0;
+    byMonth[m].total_revenue    += Number(row.total_revenue    || 0);
+    byMonth[m].total_commission += Number(row.total_commission || 0);
+  }
+
+  res.json({ data: Object.values(byMonth), year });
+}));
+
+// POST /api/admin/stats/rebuild
+// Reconstruit stats_daily depuis l'origine des données — bouton admin
+router.post('/stats/rebuild', asyncHandler(async (req, res) => {
+  const result = await statsService.rebuildAll();
+  res.json({
+    message: `Stats reconstruites : ${result.rebuilt} jour(s) du ${result.from} au ${result.to}`,
+    ...result,
+  });
+}));
+
+// POST /api/admin/stats/update-today
+// Force la mise à jour de stats_daily pour aujourd'hui
+router.post('/stats/update-today', asyncHandler(async (req, res) => {
+  await statsService.updateDay();
+  res.json({ message: `Stats du ${statsService.today()} mises à jour` });
 }));
 
 module.exports = router;
