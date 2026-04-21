@@ -82,26 +82,62 @@ router.post('/login', [
 }));
 
 // ─── POST /api/auth/google ────────────────────────────────────────────────────
+// Accepte soit un googleToken (id_token) à vérifier, soit name+email directs
 router.post('/google', asyncHandler(async (req, res) => {
   const { googleToken, name, email, avatar } = req.body;
-  if (!email) return res.status(400).json({ error: 'Email Google manquant' });
+
+  let verifiedEmail = email;
+  let verifiedName  = name;
+  let verifiedAvatar = avatar;
+
+  // Si un googleToken est fourni, le vérifier via Google tokeninfo
+  if (googleToken) {
+    try {
+      const verifyRes  = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${googleToken}`);
+      const verifyData = await verifyRes.json();
+
+      if (verifyData.error) {
+        return res.status(401).json({ error: 'Token Google invalide' });
+      }
+
+      // Vérifier que le token est pour notre app
+      const clientId = process.env.GOOGLE_CLIENT_ID;
+      if (clientId && verifyData.aud !== clientId) {
+        return res.status(401).json({ error: 'Token Google non autorisé' });
+      }
+
+      verifiedEmail  = verifyData.email;
+      verifiedName   = verifyData.name  || verifyData.email?.split('@')[0];
+      verifiedAvatar = verifyData.picture;
+    } catch (e) {
+      console.log('Google token verify error:', e.message);
+      return res.status(401).json({ error: 'Impossible de vérifier le token Google' });
+    }
+  }
+
+  if (!verifiedEmail) return res.status(400).json({ error: 'Email Google manquant' });
 
   // Chercher ou créer user
-  let { data: user } = await db.from('users').select('*').eq('email', email).single();
+  let { data: user } = await db.from('users').select('*').eq('email', verifiedEmail).single();
 
   if (!user) {
     const { data: newUser, error } = await db.from('users').insert({
-      name: name || email.split('@')[0],
-      email,
-      avatar,
+      name:     verifiedName  || verifiedEmail.split('@')[0],
+      email:    verifiedEmail,
+      avatar:   verifiedAvatar,
       provider: 'google',
-      role: 'client',
+      role:     'client',
       verified: true,
     }).select('id, name, email, role, avatar').single();
 
     if (error) throw new Error(error.message);
     user = newUser;
-    await emailService.sendWelcome(user);
+    try { await emailService.sendWelcome(user); } catch(e) {}
+  } else {
+    // Mettre à jour l'avatar si disponible
+    if (verifiedAvatar && !user.avatar) {
+      await db.from('users').update({ avatar: verifiedAvatar }).eq('id', user.id);
+    }
   }
 
   const tokens = generateTokens(user.id);

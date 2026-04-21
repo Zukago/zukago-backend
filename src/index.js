@@ -25,17 +25,18 @@ app.use((req, res, next) => {
 });
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
-app.use('/api/auth',        require('./routes/auth'));
-app.use('/api/config',      require('./routes/config'));
-app.use('/api/listings',    require('./routes/listings'));
-app.use('/api/bookings',    require('./routes/bookings'));
-app.use('/api/payments',    require('./routes/payments'));
-app.use('/api/users',       require('./routes/users'));
-app.use('/api/partners',    require('./routes/partners'));
-app.use('/api/admin',       require('./routes/admin'));
-app.use('/api/reviews',     require('./routes/reviews'));
+app.use('/api/auth',          require('./routes/auth'));
+app.use('/api/config',        require('./routes/config'));
+app.use('/api/listings',      require('./routes/listings'));
+app.use('/api/bookings',      require('./routes/bookings'));
+app.use('/api/payments',      require('./routes/payments'));
+app.use('/api/users',         require('./routes/users'));
+app.use('/api/partners',      require('./routes/partners'));
+app.use('/api/admin',         require('./routes/admin'));
+app.use('/api/reviews',       require('./routes/reviews'));
 app.use('/api/notifications', require('./routes/notifications'));
-app.use('/api/uploads',     require('./routes/uploads'));
+app.use('/api/uploads',       require('./routes/uploads'));
+app.use('/api/places',        require('./routes/places'));
 
 // Health check
 app.get('/health', (req, res) => {
