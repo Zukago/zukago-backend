@@ -112,7 +112,7 @@ router.post('/', authenticate, requirePartner, [
   body('description').trim().isLength({ min: 2 }),
   body('price').isNumeric(),
   body('city_code').notEmpty(),
-  body('quartier').notEmpty(),
+  body('quartier').optional(),
 ], asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
