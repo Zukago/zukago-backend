@@ -137,4 +137,73 @@ router.post('/withdraw', authenticate, requirePartner, asyncHandler(async (req, 
   res.status(201).json({ withdrawal, message: 'Demande de retrait soumise. Traitement sous 48h.' });
 }));
 
+
+// ─── GET /api/partners/status — Statut du compte partenaire ──────────────────
+router.get('/status', authenticate, asyncHandler(async (req, res) => {
+  const { data: partner } = await db.from('partners')
+    .select('id, status, type, cni_number, whatsapp, address, bio, created_at')
+    .eq('user_id', req.user.id)
+    .single();
+  res.json({ partner: partner || null });
+}));
+
+// ─── POST /api/partners/request — Soumettre demande partenaire ───────────────
+router.post('/request', authenticate, asyncHandler(async (req, res) => {
+  const { type, cni_number, whatsapp, address, bio } = req.body;
+
+  if (!cni_number) return res.status(400).json({ error: 'Numéro CNI requis' });
+  if (!whatsapp)   return res.status(400).json({ error: 'WhatsApp requis' });
+  if (!address)    return res.status(400).json({ error: 'Adresse requise' });
+
+  // Vérifier si demande déjà existante
+  const { data: existing } = await db.from('partners')
+    .select('id, status').eq('user_id', req.user.id).single();
+
+  if (existing) {
+    if (existing.status === 'approved') {
+      return res.status(409).json({ error: 'Votre compte partenaire est déjà approuvé' });
+    }
+    if (existing.status === 'pending') {
+      return res.status(409).json({ error: 'Une demande est déjà en cours de vérification' });
+    }
+    // Rejected → permettre une nouvelle demande
+    await db.from('partners').update({
+      type:       type || 'proprietaire',
+      cni_number,
+      whatsapp,
+      address,
+      bio:        bio || '',
+      status:     'pending',
+    }).eq('id', existing.id);
+  } else {
+    // Nouvelle demande
+    await db.from('partners').insert({
+      user_id:    req.user.id,
+      type:       type || 'proprietaire',
+      cni_number,
+      whatsapp,
+      address,
+      bio:        bio || '',
+      status:     'pending',
+    });
+  }
+
+  // Notification à l'admin
+  const { data: admins } = await db.from('users')
+    .select('id').eq('role', 'admin').eq('active', true);
+
+  if (admins?.length) {
+    await db.from('notifications').insert(
+      admins.map(a => ({
+        user_id: a.id,
+        title:   'Nouvelle demande partenaire',
+        body:    `${req.user.name || 'Un utilisateur'} a soumis une demande partenaire (${type || 'proprietaire'}).`,
+        type:    'partner',
+      }))
+    );
+  }
+
+  res.json({ message: 'Demande soumise avec succès. Vérification sous 24-48h.' });
+}));
+
 module.exports = router;

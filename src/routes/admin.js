@@ -15,7 +15,7 @@ router.use(authenticate, requireAdmin);
 router.get('/partners', asyncHandler(async (req, res) => {
   const status = req.query.status || 'pending';
   const { data } = await db.from('partners')
-    .select('*, users(name, email, phone, avatar)')
+    .select('*, users(name, email, phone, avatar, whatsapp)')
     .eq('status', status)
     .order('created_at', { ascending: false });
   res.json({ partners: data || [] });
