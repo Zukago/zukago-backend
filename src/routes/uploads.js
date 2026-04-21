@@ -6,9 +6,28 @@ const { uploadListing, uploadDocument, deleteImage } = require('../config/cloudi
 
 const router = express.Router();
 
+// Types MIME autorisés pour les photos
+const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+
+// Middleware validation photos
+const validatePhotos = (req, res, next) => {
+  if (!req.files?.length) return next();
+  for (const file of req.files) {
+    if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+      return res.status(400).json({ error: `Type de fichier non autorise: ${file.mimetype}. Utilisez JPG, PNG ou WebP.` });
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      return res.status(400).json({ error: `Fichier trop volumineux (max 10MB): ${file.originalname}` });
+    }
+  }
+  next();
+};
+
 // ─── POST /api/uploads/listing/:id — Photos d'une annonce ────────────────────
 router.post('/listing/:id', authenticate,
   uploadListing.array('photos', 10),
+  validatePhotos,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     if (!req.files?.length) return res.status(400).json({ error: 'Aucune photo envoyée' });
