@@ -161,14 +161,11 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
 
   if (existing) {
     if (existing.status === 'approved') {
-      return res.status(409).json({ error: 'Votre compte partenaire est déjà approuvé' });
+      return res.status(409).json({ error: 'Votre compte partenaire est deja approuve' });
     }
-    if (existing.status === 'pending') {
-      return res.status(409).json({ error: 'Une demande est déjà en cours de vérification' });
-    }
-    // Rejected → permettre une nouvelle demande
+    // pending ou rejected → mettre à jour les infos et garder/remettre en pending
     await db.from('partners').update({
-      type:       type || 'proprietaire',
+      type:       type || existing.type || 'proprietaire',
       cni_number,
       whatsapp,
       address,

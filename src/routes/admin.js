@@ -510,28 +510,79 @@ router.delete('/users/:id', asyncHandler(async (req, res) => {
     // 4. Supprimer avis
     await db.from('reviews').delete().eq('user_id', id);
 
-    // 5. Annuler les réservations en cours
-    await db.from('bookings')
-      .update({ status: 'cancelled', cancel_reason: 'Compte supprimé par admin' })
+    // 5. Annuler et notifier les réservations en cours
+    const { data: activeBookings } = await db.from('bookings')
+      .select('id, listing_id')
       .eq('user_id', id)
       .in('status', ['pending', 'confirmed']);
 
-    // 6. Si partenaire — désactiver les annonces + supprimer données partenaire
+    if (activeBookings?.length) {
+      await db.from('bookings')
+        .update({ status: 'cancelled', cancel_reason: 'Compte supprime par admin' })
+        .in('id', activeBookings.map(b => b.id));
+    }
+
+    // 6. Si partenaire — gérer les annonces et réservations clients
     const { data: partner } = await db.from('partners').select('id').eq('user_id', id).single();
     if (partner) {
-      await db.from('listings').update({ status: 'deleted' }).eq('partner_id', partner.id);
+      // Récupérer toutes les annonces du partenaire
+      const { data: listings } = await db.from('listings')
+        .select('id, title').eq('partner_id', partner.id);
+
+      if (listings?.length) {
+        const listingIds = listings.map(l => l.id);
+
+        // Trouver les réservations des clients sur ces annonces
+        const { data: clientBookings } = await db.from('bookings')
+          .select('id, user_id, status')
+          .in('listing_id', listingIds)
+          .in('status', ['pending', 'confirmed']);
+
+        if (clientBookings?.length) {
+          // Annuler les réservations clients
+          await db.from('bookings')
+            .update({ status: 'cancelled', cancel_reason: 'Partenaire supprime' })
+            .in('id', clientBookings.map(b => b.id));
+
+          // Notifier les clients
+          const clientNotifs = clientBookings.map(b => ({
+            user_id: b.user_id,
+            title:   'Reservation annulee',
+            body:    'Un partenaire a ete retire de la plateforme. Votre reservation a ete annulee. Contactez le support.',
+            type:    'info',
+          }));
+          await db.from('notifications').insert(clientNotifs).catch(() => {});
+        }
+
+        // Supprimer les photos des annonces
+        const { data: photos } = await db.from('listing_photos')
+          .select('public_id').in('listing_id', listingIds);
+        
+        if (photos?.length) {
+          await db.from('listing_photos').delete().in('listing_id', listingIds);
+        }
+
+        // Supprimer les annonces
+        await db.from('listings').delete().in('id', listingIds);
+      }
+
+      // Supprimer le profil partenaire
       await db.from('partners').delete().eq('user_id', id);
     }
 
-    // 7. Supprimer l'utilisateur
-    await db.from('users').delete().eq('id', id);
+    // 7. Supprimer commissions liées
+    await db.from('commissions').delete().eq('user_id', id).catch(() => {});
+
+    // 8. Supprimer l'utilisateur
+    const { error: deleteError } = await db.from('users').delete().eq('id', id);
+    if (deleteError) throw new Error(deleteError.message);
 
   } catch (e) {
     console.log('Delete user cascade error:', e.message);
-    return res.status(500).json({ error: 'Erreur lors de la suppression: ' + e.message });
+    return res.status(500).json({ error: 'Erreur suppression: ' + e.message });
   }
 
-  res.json({ message: `Compte ${user.name} (${user.email}) supprimé définitivement` });
+  res.json({ message: `Compte ${user.name} (${user.email}) supprime definitivement` });
 }));
 
 module.exports = router;
