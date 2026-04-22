@@ -488,7 +488,7 @@ router.patch('/users/:id/suspend', asyncHandler(async (req, res) => {
   res.json({ message: `Compte ${user.name} ${active ? 'réactivé' : 'suspendu'}` });
 }));
 
-// DELETE /api/admin/users/:id — Supprimer un compte + cascade
+// DELETE /api/admin/users/:id — Supprimer compte + cascade complète
 router.delete('/users/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
 
@@ -496,93 +496,79 @@ router.delete('/users/:id', asyncHandler(async (req, res) => {
   if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
   if (user.role === 'admin') return res.status(403).json({ error: 'Impossible de supprimer un admin' });
 
-  // Cascade propre dans l'ordre des dépendances FK
   try {
-    // 1. Supprimer notifications
-    await db.from('notifications').delete().eq('user_id', id);
-
-    // 2. Supprimer favoris
-    await db.from('favorites').delete().eq('user_id', id);
-
-    // 3. Supprimer push tokens
-    await db.from('push_tokens').delete().eq('user_id', id);
-
-    // 4. Supprimer avis
-    await db.from('reviews').delete().eq('user_id', id);
-
-    // 5. Annuler et notifier les réservations en cours
-    const { data: activeBookings } = await db.from('bookings')
-      .select('id, listing_id')
-      .eq('user_id', id)
-      .in('status', ['pending', 'confirmed']);
-
-    if (activeBookings?.length) {
-      await db.from('bookings')
-        .update({ status: 'cancelled', cancel_reason: 'Compte supprime par admin' })
-        .in('id', activeBookings.map(b => b.id));
-    }
-
-    // 6. Si partenaire — gérer les annonces et réservations clients
+    // ── Si partenaire → supprimer ses annonces et notifier ses clients
     const { data: partner } = await db.from('partners').select('id').eq('user_id', id).single();
     if (partner) {
-      // Récupérer toutes les annonces du partenaire
       const { data: listings } = await db.from('listings')
         .select('id, title').eq('partner_id', partner.id);
 
       if (listings?.length) {
         const listingIds = listings.map(l => l.id);
 
-        // Trouver les réservations des clients sur ces annonces
+        // Trouver clients avec réservations actives sur ces annonces
         const { data: clientBookings } = await db.from('bookings')
-          .select('id, user_id, status')
+          .select('id, user_id')
           .in('listing_id', listingIds)
           .in('status', ['pending', 'confirmed']);
 
+        // Notifier les clients
         if (clientBookings?.length) {
-          // Annuler les réservations clients
-          await db.from('bookings')
-            .update({ status: 'cancelled', cancel_reason: 'Partenaire supprime' })
-            .in('id', clientBookings.map(b => b.id));
-
-          // Notifier les clients
-          const clientNotifs = clientBookings.map(b => ({
-            user_id: b.user_id,
-            title:   'Reservation annulee',
-            body:    'Un partenaire a ete retire de la plateforme. Votre reservation a ete annulee. Contactez le support.',
-            type:    'info',
-          }));
-          await db.from('notifications').insert(clientNotifs).catch(() => {});
+          const uniqueClients = [...new Set(clientBookings.map(b => b.user_id))];
+          for (const clientId of uniqueClients) {
+            await db.from('notifications').insert({
+              user_id: clientId,
+              title:   'Reservation annulee',
+              body:    'Un partenaire a quitte la plateforme. Votre reservation a ete annulee. Contactez le support ZUKAGO.',
+              type:    'info',
+            }).catch(() => {});
+          }
+          // Supprimer les réservations
+          await db.from('bookings').delete().in('id', clientBookings.map(b => b.id));
         }
 
-        // Supprimer les photos des annonces
-        const { data: photos } = await db.from('listing_photos')
-          .select('public_id').in('listing_id', listingIds);
-        
-        if (photos?.length) {
-          await db.from('listing_photos').delete().in('listing_id', listingIds);
-        }
+        // Supprimer toutes les réservations liées aux annonces
+        await db.from('bookings').delete().in('listing_id', listingIds);
 
-        // Supprimer les annonces
+        // Supprimer photos annonces
+        await db.from('listing_amenities').delete().in('listing_id', listingIds).catch(() => {});
+        await db.from('listing_photos').delete().in('listing_id', listingIds).catch(() => {});
+
+        // Supprimer annonces
         await db.from('listings').delete().in('id', listingIds);
       }
 
+      // Supprimer retraits du partenaire
+      await db.from('withdrawals').delete().eq('partner_id', partner.id).catch(() => {});
+
       // Supprimer le profil partenaire
-      await db.from('partners').delete().eq('user_id', id);
+      await db.from('partners').delete().eq('id', partner.id);
     }
 
-    // 7. Supprimer commissions liées
-    await db.from('commissions').delete().eq('user_id', id).catch(() => {});
+    // ── Supprimer les réservations du user (en tant que client)
+    await db.from('bookings').delete().eq('user_id', id);
 
-    // 8. Supprimer l'utilisateur
-    const { error: deleteError } = await db.from('users').delete().eq('id', id);
-    if (deleteError) throw new Error(deleteError.message);
+    // ── Supprimer dans l'ordre FK
+    await db.from('commissions').delete().eq('user_id', id).catch(() => {});
+    await db.from('payments').delete().eq('user_id', id).catch(() => {});
+    await db.from('reviews').delete().eq('user_id', id).catch(() => {});
+    await db.from('favorites').delete().eq('user_id', id).catch(() => {});
+    await db.from('push_tokens').delete().eq('user_id', id).catch(() => {});
+    await db.from('notifications').delete().eq('user_id', id).catch(() => {});
+
+    // ── Supprimer l'utilisateur
+    const { error } = await db.from('users').delete().eq('id', id);
+    if (error) throw new Error(error.message);
+
+    // ── Notifier l'admin (log)
+    console.log(`[Admin] User supprime: ${user.name} (${user.email})`);
 
   } catch (e) {
-    console.log('Delete user cascade error:', e.message);
+    console.log('[Admin] Delete error:', e.message);
     return res.status(500).json({ error: 'Erreur suppression: ' + e.message });
   }
 
-  res.json({ message: `Compte ${user.name} (${user.email}) supprime definitivement` });
+  res.json({ message: `Compte de ${user.name} supprime avec toutes ses donnees.` });
 }));
 
 
