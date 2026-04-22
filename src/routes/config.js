@@ -84,6 +84,7 @@ router.get('/app', asyncHandler(async (req, res) => {
       icon_name:   row.icon_name,
       title:       row.title,
       description: row.description,
+      video_url:   row.video_url || null,   // ✅ V7 : URL vidéo Cloudinary
     });
   }
 
