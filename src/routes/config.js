@@ -24,6 +24,9 @@ router.get('/app', asyncHandler(async (req, res) => {
     { data: partnerSection },
     { data: promoBanners },
     { data: translations },
+    // ✅ NOUVEAU V6 : contenu dynamique par service
+    { data: howItWorksByServiceRaw },
+    { data: partnerSectionByServiceRaw },
   ] = await Promise.all([
     db.from('app_config').select('key, value, type'),
     db.from('services').select('*').eq('enabled', true).order('sort_order'),
@@ -38,6 +41,9 @@ router.get('/app', asyncHandler(async (req, res) => {
     db.from('partner_section').select('*').single(),
     db.from('promo_banners').select('*').eq('enabled', true).order('sort_order'),
     db.from('translations').select('key, value').eq('lang', lang),
+    // ✅ NOUVEAU V6 : 2 nouvelles queries
+    db.from('how_it_works_by_service').select('*').eq('lang', lang).order('service_code').order('step_order'),
+    db.from('partner_section_by_service').select('*').eq('lang', lang),
   ]);
 
   // Parser les configs
@@ -69,6 +75,32 @@ router.get('/app', asyncHandler(async (req, res) => {
     configs?.find(c => c.key === 'car_types')?.value || '["Berline","SUV","4x4","Minibus","Pickup","Luxe"]'
   );
 
+  // ✅ NOUVEAU V6 : Transformer en objet { apt: [steps], hotel: [steps], ... }
+  const howItWorksByService = {};
+  for (const row of howItWorksByServiceRaw || []) {
+    if (!howItWorksByService[row.service_code]) howItWorksByService[row.service_code] = [];
+    howItWorksByService[row.service_code].push({
+      step_order:  row.step_order,
+      icon_name:   row.icon_name,
+      title:       row.title,
+      description: row.description,
+    });
+  }
+
+  // ✅ NOUVEAU V6 : Transformer en objet { apt: {...}, hotel: {...}, ... }
+  const partnerSectionByService = {};
+  for (const row of partnerSectionByServiceRaw || []) {
+    partnerSectionByService[row.service_code] = {
+      tag:         row.tag,
+      title:       row.title,
+      description: row.description,
+      stat_num:    row.stat_num,
+      stat_txt:    row.stat_txt,
+      perks:       Array.isArray(row.perks) ? row.perks : (typeof row.perks === 'string' ? JSON.parse(row.perks) : []),
+      cta_label:   row.cta_label,
+    };
+  }
+
   res.json({
     appConfig,
     services,
@@ -80,12 +112,15 @@ router.get('/app', asyncHandler(async (req, res) => {
     navTabs,
     profileMenu,
     howItWorks,
-    partnerSection: partnerSection[0] || partnerSection,
+    partnerSection: partnerSection?.[0] || partnerSection,
     promoBanners,
     translations: translationsMap,
     allQuartiers: quartiersMap,
     aptTypes,
     carTypes,
+    // ✅ NOUVEAU V6 : contenu dynamique par service
+    howItWorksByService,
+    partnerSectionByService,
     calendar: {
       months: appConfig[`calendar_months_${lang}`] || appConfig.calendar_months_fr,
       days:   appConfig[`calendar_days_${lang}`]   || appConfig.calendar_days_fr,
