@@ -71,9 +71,11 @@ router.post('/register', registerLimiter, [
 
   if (error) throw new Error(error.message);
 
-  if (role === 'partner') {
-    await db.from('partners').insert({ user_id: user.id, type: 'proprietaire', status: 'pending' });
-  }
+  // ⚠️ NE PAS créer de ligne partners à l'inscription
+  // Le user doit soumettre sa demande via POST /partners/request pour que :
+  //   - la ligne partners soit créée
+  //   - demande_verified passe à true
+  //   - admin puisse voir la demande dans le dashboard
 
   try { await emailService.sendWelcome(user); } catch(e) {}
 

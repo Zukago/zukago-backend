@@ -155,10 +155,14 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
   if (!whatsapp)   return res.status(400).json({ error: 'WhatsApp requis' });
   if (!address)    return res.status(400).json({ error: 'Adresse requise' });
 
-  // Bloquer si déjà partenaire
+  // Récupérer l'état actuel du user
   const { data: userRow } = await db.from('users')
-    .select('role').eq('id', req.user.id).maybeSingle();
-  if (userRow?.role === 'partner') {
+    .select('id, role, verified, demande_verified').eq('id', req.user.id).maybeSingle();
+
+  if (!userRow) return res.status(404).json({ error: 'Utilisateur introuvable' });
+
+  // Si déjà validé par admin → rien à faire
+  if (userRow.verified === true) {
     return res.status(409).json({ error: 'Votre compte partenaire est deja approuve' });
   }
 
@@ -167,10 +171,7 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
     .select('id, status').eq('user_id', req.user.id).maybeSingle();
 
   if (existing) {
-    if (existing.status === 'approved') {
-      return res.status(409).json({ error: 'Votre compte partenaire est deja approuve' });
-    }
-    // pending ou rejected → mettre à jour les infos et remettre en pending
+    // Update existing (pending ou rejected → remettre en pending)
     await db.from('partners').update({
       type:          type || 'proprietaire',
       cni_number,
@@ -193,13 +194,20 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
     });
   }
 
-  // ✅ Marquer le user comme "demande soumise"
-  const { error: updErr } = await db.from('users')
-    .update({ demande_verified: true })
-    .eq('id', req.user.id);
-  if (updErr) console.log('[Partners] update demande_verified error:', updErr.message);
+  // ✅ Update user :
+  //   - demande_verified = true (demande soumise)
+  //   - role = 'partner' (si c'était encore 'client')
+  //   - verified reste false (admin doit encore valider)
+  const updates = { demande_verified: true };
+  if (userRow.role !== 'partner' && userRow.role !== 'admin') {
+    updates.role = 'partner';
+  }
 
-  // Notification à tous les admins
+  const { error: updErr } = await db.from('users')
+    .update(updates).eq('id', req.user.id);
+  if (updErr) console.log('[Partners] update user error:', updErr.message);
+
+  // Notification aux admins
   const { data: admins } = await db.from('users')
     .select('id').eq('role', 'admin').eq('active', true);
 
@@ -216,7 +224,7 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
     } catch(e) { console.log('[Partners] admin notif error:', e.message); }
   }
 
-  console.log(`[Partners] ✅ Request submitted by ${req.user.email}, demande_verified=true`);
+  console.log(`[Partners] ✅ Request submitted by ${req.user.email}, role=${updates.role || userRow.role}, demande_verified=true`);
   res.json({ message: 'Demande soumise avec succès. Vérification sous 24-48h.' });
 }));
 

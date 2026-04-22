@@ -90,8 +90,11 @@ router.patch('/partners/:id/approve', asyncHandler(async (req, res) => {
   }).eq('id', req.params.id);
   if (uErr) { console.error('[Admin] approve update error:', uErr.message); return res.status(500).json({ error: uErr.message }); }
 
-  // Update role user
-  await safe(db.from('users').update({ role: 'partner' }).eq('id', partner.user_id), 'approve-role');
+  // ✅ Update user : role='partner' + verified=true (admin a approuvé)
+  await safe(
+    db.from('users').update({ role: 'partner', verified: true }).eq('id', partner.user_id),
+    'approve-user-verified'
+  );
 
   // Notification in-app
   try {
@@ -133,10 +136,11 @@ router.patch('/partners/:id/reject', asyncHandler(async (req, res) => {
     .eq('id', req.params.id);
   if (uErr) return res.status(500).json({ error: uErr.message });
 
-  // ✅ Reset demande_verified = false pour que le user puisse refaire une demande
+  // ✅ Reset user : demande_verified=false + verified=false
+  // (le user peut refaire une demande, role reste 'partner' pour qu'il voit le bouton Publier)
   await safe(
-    db.from('users').update({ demande_verified: false }).eq('id', partner.user_id),
-    'reject-reset-demande'
+    db.from('users').update({ demande_verified: false, verified: false }).eq('id', partner.user_id),
+    'reject-reset-user'
   );
 
   // Notification in-app
