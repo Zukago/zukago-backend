@@ -19,39 +19,50 @@ const MAILGUN_BASE = `https://api.eu.mailgun.net/v3/${MAILGUN_DOMAIN}/messages`;
  */
 async function sendEmail({ to, subject, html, text }) {
   if (!MAILGUN_API_KEY) {
-    console.log('[emailService] MAILGUN_API_KEY manquant — email non envoyé:', subject);
-    return;
+    console.log('[emailService] MAILGUN_API_KEY manquant');
+    return null;
+  }
+  if (!MAILGUN_DOMAIN) {
+    console.log('[emailService] MAILGUN_DOMAIN manquant');
+    return null;
   }
 
-  const body = new URLSearchParams({
-    from:    MAILGUN_FROM,
-    to,
-    subject,
-    html:    html || '',
-    text:    text || '',
-  });
+  // Construire le corps en URLSearchParams
+  const params = new URLSearchParams();
+  params.append('from',    MAILGUN_FROM);
+  params.append('to',      to);
+  params.append('subject', subject);
+  if (html) params.append('html', html);
+  if (text) params.append('text', text);
+
+  // Encoder la clé en Base64 pour Basic Auth
+  const credentials = Buffer.from('api:' + MAILGUN_API_KEY).toString('base64');
 
   try {
     const response = await fetch(MAILGUN_BASE, {
       method:  'POST',
       headers: {
-        Authorization: 'Basic ' + Buffer.from(`api:${MAILGUN_API_KEY}`).toString('base64'),
-        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': 'Basic ' + credentials,
+        'Content-Type':  'application/x-www-form-urlencoded',
       },
-      body: body.toString(),
+      body: params.toString(),
     });
 
-    const data = await response.json();
-    if (!response.ok) {
-      console.log('[emailService] Mailgun error:', response.status, JSON.stringify(data));
-      console.log('[emailService] URL:', MAILGUN_BASE);
-      console.log('[emailService] Domain:', MAILGUN_DOMAIN);
+    let data;
+    try { data = await response.json(); } catch(e) { data = {}; }
+
+    if (response.ok) {
+      console.log('[Mailgun] OK — envoyé à:', to, '| sujet:', subject, '| id:', data.id);
     } else {
-      console.log('[emailService] Email envoye a', to, ':', subject, '| ID:', data.id);
+      console.log('[Mailgun] ERREUR', response.status, ':', JSON.stringify(data));
+      console.log('[Mailgun] URL:', MAILGUN_BASE);
+      console.log('[Mailgun] From:', MAILGUN_FROM);
+      console.log('[Mailgun] To:', to);
     }
     return data;
   } catch (e) {
-    console.log('[emailService] Fetch error:', e.message);
+    console.log('[Mailgun] Exception:', e.message);
+    return null;
   }
 }
 

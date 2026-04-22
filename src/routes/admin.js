@@ -585,4 +585,11 @@ router.delete('/users/:id', asyncHandler(async (req, res) => {
   res.json({ message: `Compte ${user.name} (${user.email}) supprime definitivement` });
 }));
 
+
+// GET /api/admin/test-email — Tester Mailgun
+router.get('/test-email', asyncHandler(async (req, res) => {
+  const result = await emailService.testConnection();
+  res.json({ result });
+}));
+
 module.exports = router;
