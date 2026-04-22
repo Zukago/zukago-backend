@@ -58,13 +58,24 @@ router.get('/partners', asyncHandler(async (req, res) => {
     result = data || [];
   }
 
-  // ✅ FILTRAGE : pour les pending, n'afficher que ceux dont l'user.demande_verified = true
-  // (protection contre les partners auto-créés par erreur)
+  // ═══════════════════════════════════════════════════════════════════════
+  // ✅ FILTRAGE selon le status demandé
+  // ═══════════════════════════════════════════════════════════════════════
   if (status === 'pending') {
-    result = result.filter(p => p.users?.demande_verified === true);
+    // En attente = demande soumise MAIS admin n'a pas encore approuvé
+    // → demande_verified=true ET verified=false
+    result = result.filter(p =>
+      p.users?.demande_verified === true &&
+      p.users?.verified !== true
+    );
+  } else if (status === 'approved') {
+    // Approuvé = admin a validé
+    // → verified=true
+    result = result.filter(p => p.users?.verified === true);
   }
+  // status='rejected' → pas de filtre supplémentaire (déjà filtré par partners.status)
 
-  console.log(`[Admin] /partners OK, ${result.length} rows after filter`);
+  console.log(`[Admin] /partners OK, ${result.length} rows after filter (status=${status})`);
   res.json({ partners: result });
 }));
 
