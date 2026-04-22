@@ -179,95 +179,140 @@ router.delete('/listings/:id', asyncHandler(async (req, res) => {
   const listingId = req.params.id;
 
   const { data: listing } = await db.from('listings')
-    .select('id, title, partner_id').eq('id', listingId).single();
-
+    .select('id, title, partner_id').eq('id', listingId).maybeSingle();
   if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
 
-  // Récupérer photos Cloudinary pour suppression
-  const { data: photos } = await db.from('listing_photos')
-    .select('public_id').eq('listing_id', listingId);
-
-  // Récupérer bookings actifs pour notifier clients
+  // Bookings actifs → notifier clients
   const { data: activeBookings } = await db.from('bookings')
     .select('id, user_id, status')
     .eq('listing_id', listingId)
     .in('status', ['pending', 'confirmed']);
 
-  // Notifier clients
   if (activeBookings?.length) {
     const uniqueClients = [...new Set(activeBookings.map(b => b.user_id))];
     await db.from('notifications').insert(
       uniqueClients.map(cid => ({
         user_id: cid,
-        title:   'Réservation annulée',
-        body:    `Votre réservation pour "${listing.title}" a été annulée par l'administration. Nous nous excusons pour ce désagrément.`,
+        title:   'Reservation annulee',
+        body:    `Votre reservation pour "${listing.title}" a ete annulee par l'administration ZUKAGO. Nous nous excusons pour ce desagrement.`,
         type:    'info',
       }))
     ).catch(() => {});
   }
 
-  // Notifier partenaire
+  // Notifier le partenaire
   if (listing.partner_id) {
     const { data: partnerRow } = await db.from('partners')
-      .select('user_id').eq('id', listing.partner_id).single();
+      .select('user_id').eq('id', listing.partner_id).maybeSingle();
     if (partnerRow?.user_id) {
       await db.from('notifications').insert({
         user_id: partnerRow.user_id,
-        title:   'Annonce supprimée par ZUKAGO',
-        body:    `Votre annonce "${listing.title}" a été supprimée par l'administration. ${activeBookings?.length || 0} réservation(s) active(s) annulée(s).`,
+        title:   'Annonce supprimee par ZUKAGO',
+        body:    `Votre annonce "${listing.title}" a ete supprimee par l'administration. ${activeBookings?.length || 0} reservation(s) annulee(s).`,
         type:    'info',
       }).catch(() => {});
     }
   }
 
-  // Supprimer photos Cloudinary (best effort)
+  // Photos Cloudinary
+  const { data: photos } = await db.from('listing_photos')
+    .select('public_id').eq('listing_id', listingId);
   if (photos?.length) {
     await Promise.allSettled(
       photos.filter(p => p.public_id).map(p => deleteImage(p.public_id).catch(() => null))
     );
   }
 
-  // Cascade explicite (avant DELETE pour éviter les blocages FK)
+  // Cascade manuelle
   await db.from('listing_photos').delete().eq('listing_id', listingId).catch(() => {});
   await db.from('listing_amenities').delete().eq('listing_id', listingId).catch(() => {});
   await db.from('reviews').delete().eq('listing_id', listingId).catch(() => {});
   await db.from('favorites').delete().eq('listing_id', listingId).catch(() => {});
   await db.from('bookings').delete().eq('listing_id', listingId).catch(() => {});
 
-  // Delete final
+  // Delete
   const { error } = await db.from('listings').delete().eq('id', listingId);
-  if (error) {
-    console.error('[Admin] Listing delete error:', error);
-    return res.status(500).json({ error: `Erreur suppression : ${error.message}` });
-  }
+  if (error) return res.status(500).json({ error: `Erreur suppression : ${error.message}` });
 
-  // Vérification post-delete
-  const { data: stillExists } = await db.from('listings').select('id').eq('id', listingId).single();
-  if (stillExists) {
-    console.error('[Admin] Listing still exists after delete!', listingId);
-    return res.status(500).json({ error: 'La suppression a échoué (ligne toujours présente). Vérifiez les FK CASCADE.' });
-  }
+  // Vérif post-delete
+  const { data: stillExists } = await db.from('listings').select('id').eq('id', listingId).maybeSingle();
+  if (stillExists) return res.status(500).json({ error: 'La suppression a echoue (ligne toujours presente).' });
 
   console.log(`[Admin] ✅ Listing deleted: ${listing.title}`);
-  res.json({ message: 'Annonce supprimée définitivement', deleted: true });
+  res.json({
+    message: 'Annonce supprimee definitivement',
+    deleted: true,
+    bookings_cancelled: activeBookings?.length || 0,
+  });
 }));
 
-// DELETE /api/admin/partners/:id — Admin force suppression partenaire + annonces
+// GET /api/admin/partners/:id/impact — Voir l'impact d'une suppression
+// Retourne le nombre d'annonces et de réservations actives pour WARNING côté admin
+router.get('/partners/:id/impact', asyncHandler(async (req, res) => {
+  const partnerId = req.params.id;
+
+  const { data: partner } = await db.from('partners')
+    .select('id, users(name, email)').eq('id', partnerId).maybeSingle();
+  if (!partner) return res.status(404).json({ error: 'Partenaire introuvable' });
+
+  const { data: listings } = await db.from('listings')
+    .select('id, title').eq('partner_id', partnerId);
+  const listingIds = (listings || []).map(l => l.id);
+
+  let activeBookings = 0, pendingBookings = 0, confirmedBookings = 0, clientsAffected = 0;
+  if (listingIds.length) {
+    const { data: bookings } = await db.from('bookings')
+      .select('user_id, status').in('listing_id', listingIds).in('status', ['pending', 'confirmed']);
+    if (bookings?.length) {
+      activeBookings    = bookings.length;
+      pendingBookings   = bookings.filter(b => b.status === 'pending').length;
+      confirmedBookings = bookings.filter(b => b.status === 'confirmed').length;
+      clientsAffected   = new Set(bookings.map(b => b.user_id)).size;
+    }
+  }
+
+  res.json({
+    partner_name:      partner.users?.name,
+    listings_count:    listingIds.length,
+    active_bookings:   activeBookings,
+    pending_bookings:  pendingBookings,
+    confirmed_bookings: confirmedBookings,
+    clients_affected:  clientsAffected,
+  });
+}));
+
+// DELETE /api/admin/partners/:id — Admin supprime un partenaire + cascade totale
+// Le user devient 'client' (pas supprimé) pour qu'il puisse faire une nouvelle demande
 router.delete('/partners/:id', asyncHandler(async (req, res) => {
   const { deleteImage } = require('../config/cloudinary');
   const partnerId = req.params.id;
 
   const { data: partner } = await db.from('partners')
-    .select('id, user_id, users(name, email)').eq('id', partnerId).single();
+    .select('id, user_id, users(name, email)').eq('id', partnerId).maybeSingle();
   if (!partner) return res.status(404).json({ error: 'Partenaire introuvable' });
 
-  // Récupérer annonces du partenaire
+  // Annonces
   const { data: listings } = await db.from('listings')
     .select('id, title').eq('partner_id', partnerId);
   const listingIds = (listings || []).map(l => l.id);
 
-  // Photos à supprimer de Cloudinary
+  // Clients avec bookings actifs → notifier
   if (listingIds.length) {
+    const { data: activeBookings } = await db.from('bookings')
+      .select('user_id').in('listing_id', listingIds).in('status', ['pending', 'confirmed']);
+    if (activeBookings?.length) {
+      const uniqueClients = [...new Set(activeBookings.map(b => b.user_id))];
+      await db.from('notifications').insert(
+        uniqueClients.map(cid => ({
+          user_id: cid,
+          title:   'Reservation annulee',
+          body:    `Le partenaire ${partner.users?.name || ''} a ete retire de la plateforme. Votre reservation a ete annulee. Contactez le support pour un remboursement ou une alternative.`,
+          type:    'info',
+        }))
+      ).catch(() => {});
+    }
+
+    // Photos Cloudinary
     const { data: photos } = await db.from('listing_photos')
       .select('public_id').in('listing_id', listingIds);
     if (photos?.length) {
@@ -275,36 +320,8 @@ router.delete('/partners/:id', asyncHandler(async (req, res) => {
         photos.filter(p => p.public_id).map(p => deleteImage(p.public_id).catch(() => null))
       );
     }
-  }
 
-  // Notifier clients avec réservations actives
-  if (listingIds.length) {
-    const { data: activeBookings } = await db.from('bookings')
-      .select('user_id').in('listing_id', listingIds).in('status', ['pending', 'confirmed']);
-
-    if (activeBookings?.length) {
-      const uniqueClients = [...new Set(activeBookings.map(b => b.user_id))];
-      await db.from('notifications').insert(
-        uniqueClients.map(cid => ({
-          user_id: cid,
-          title:   'Partenaire supprimé',
-          body:    'Un partenaire a quitté ZUKAGO. Votre réservation a été annulée. Contactez le support pour un remboursement.',
-          type:    'info',
-        }))
-      ).catch(() => {});
-    }
-  }
-
-  // Notifier le partenaire
-  await db.from('notifications').insert({
-    user_id: partner.user_id,
-    title:   'Compte partenaire supprimé',
-    body:    'Votre compte partenaire a été supprimé par l\'administration ZUKAGO.',
-    type:    'info',
-  }).catch(() => {});
-
-  // Cascade : supprimer tout ce qui référence les listings
-  if (listingIds.length) {
+    // Cascade manuelle
     await db.from('listing_photos').delete().in('listing_id', listingIds).catch(() => {});
     await db.from('listing_amenities').delete().in('listing_id', listingIds).catch(() => {});
     await db.from('reviews').delete().in('listing_id', listingIds).catch(() => {});
@@ -313,21 +330,33 @@ router.delete('/partners/:id', asyncHandler(async (req, res) => {
     await db.from('listings').delete().in('id', listingIds);
   }
 
-  // Supprimer retraits
+  // Notifier le partenaire lui-même
+  await db.from('notifications').insert({
+    user_id: partner.user_id,
+    title:   'Compte partenaire supprime',
+    body:    `Votre compte partenaire a ete supprime par l'administration ZUKAGO. Vous pouvez soumettre une nouvelle demande si besoin.`,
+    type:    'info',
+  }).catch(() => {});
+
+  // Retraits
   await db.from('withdrawals').delete().eq('partner_id', partnerId).catch(() => {});
 
   // Delete partner
   const { error } = await db.from('partners').delete().eq('id', partnerId);
   if (error) return res.status(500).json({ error: `Erreur suppression : ${error.message}` });
 
-  // Vérification
-  const { data: stillExists } = await db.from('partners').select('id').eq('id', partnerId).single();
-  if (stillExists) return res.status(500).json({ error: 'La suppression a échoué (partenaire toujours présent).' });
+  // Vérif post-delete
+  const { data: stillExists } = await db.from('partners').select('id').eq('id', partnerId).maybeSingle();
+  if (stillExists) return res.status(500).json({ error: 'La suppression a echoue.' });
 
-  // Remettre l'user en 'client' (ne pas le supprimer, il peut recréer demande)
+  // Remettre user en 'client' (ne pas le supprimer)
   await db.from('users').update({ role: 'client' }).eq('id', partner.user_id).catch(() => {});
 
-  res.json({ message: `Partenaire ${partner.users?.name || ''} supprimé`, deleted: true });
+  res.json({
+    message:  `Partenaire ${partner.users?.name || ''} supprime. L'utilisateur a ete remis en client.`,
+    deleted:  true,
+    listings_deleted: listingIds.length,
+  });
 }));
 
 // ─── RETRAITS ─────────────────────────────────────────────────────────────────
@@ -649,83 +678,120 @@ router.patch('/users/:id/suspend', asyncHandler(async (req, res) => {
 router.delete('/users/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
 
-  const { data: user } = await db.from('users').select('name, email, role').eq('id', id).single();
+  const { data: user } = await db.from('users')
+    .select('id, name, email, role').eq('id', id).single();
   if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
-  if (user.role === 'admin') return res.status(403).json({ error: 'Impossible de supprimer un admin' });
+  if (user.role === 'admin')   return res.status(403).json({ error: 'Impossible de supprimer un admin' });
+  if (user.id === req.user.id) return res.status(403).json({ error: 'Impossible de supprimer votre propre compte' });
+
+  const { deleteImage } = require('../config/cloudinary');
+  const log = [];
 
   try {
-    // ── Si partenaire → supprimer ses annonces et notifier ses clients
-    const { data: partner } = await db.from('partners').select('id').eq('user_id', id).single();
+    // ─────────────────────────────────────────────────────────────
+    // 1. Si user est PARTENAIRE → cascade sur ses annonces
+    // ─────────────────────────────────────────────────────────────
+    const { data: partner } = await db.from('partners')
+      .select('id').eq('user_id', id).maybeSingle();
+
     if (partner) {
+      log.push(`partner=${partner.id}`);
+
       const { data: listings } = await db.from('listings')
         .select('id, title').eq('partner_id', partner.id);
+      const listingIds = (listings || []).map(l => l.id);
+      log.push(`listings=${listingIds.length}`);
 
-      if (listings?.length) {
-        const listingIds = listings.map(l => l.id);
+      if (listingIds.length) {
+        // Notifier clients avec réservations actives
+        const { data: activeBookings } = await db.from('bookings')
+          .select('user_id').in('listing_id', listingIds).in('status', ['pending', 'confirmed']);
 
-        // Trouver clients avec réservations actives sur ces annonces
-        const { data: clientBookings } = await db.from('bookings')
-          .select('id, user_id')
-          .in('listing_id', listingIds)
-          .in('status', ['pending', 'confirmed']);
-
-        // Notifier les clients
-        if (clientBookings?.length) {
-          const uniqueClients = [...new Set(clientBookings.map(b => b.user_id))];
-          for (const clientId of uniqueClients) {
-            await db.from('notifications').insert({
-              user_id: clientId,
+        if (activeBookings?.length) {
+          const uniqueClients = [...new Set(activeBookings.map(b => b.user_id))];
+          await db.from('notifications').insert(
+            uniqueClients.map(cid => ({
+              user_id: cid,
               title:   'Reservation annulee',
-              body:    'Un partenaire a quitte la plateforme. Votre reservation a ete annulee. Contactez le support ZUKAGO.',
+              body:    `Un partenaire a quitte la plateforme. Votre reservation a ete annulee. Contactez le support ZUKAGO.`,
               type:    'info',
-            }).catch(() => {});
-          }
-          // Supprimer les réservations
-          await db.from('bookings').delete().in('id', clientBookings.map(b => b.id));
+            }))
+          ).catch(e => log.push(`client-notif-err=${e.message}`));
         }
 
-        // Supprimer toutes les réservations liées aux annonces
-        await db.from('bookings').delete().in('listing_id', listingIds);
+        // Photos Cloudinary
+        const { data: photos } = await db.from('listing_photos')
+          .select('public_id').in('listing_id', listingIds);
+        if (photos?.length) {
+          await Promise.allSettled(
+            photos.filter(p => p.public_id).map(p => deleteImage(p.public_id).catch(() => null))
+          );
+        }
 
-        // Supprimer photos annonces
-        await db.from('listing_amenities').delete().in('listing_id', listingIds).catch(() => {});
+        // Cascade manuelle (redondant avec FK CASCADE mais safe)
+        await db.from('reviews').delete().in('listing_id', listingIds).catch(() => {});
+        await db.from('favorites').delete().in('listing_id', listingIds).catch(() => {});
         await db.from('listing_photos').delete().in('listing_id', listingIds).catch(() => {});
-
-        // Supprimer annonces
+        await db.from('listing_amenities').delete().in('listing_id', listingIds).catch(() => {});
+        await db.from('bookings').delete().in('listing_id', listingIds).catch(() => {});
         await db.from('listings').delete().in('id', listingIds);
       }
 
-      // Supprimer retraits du partenaire
       await db.from('withdrawals').delete().eq('partner_id', partner.id).catch(() => {});
-
-      // Supprimer le profil partenaire
       await db.from('partners').delete().eq('id', partner.id);
+      log.push('partner-deleted');
     }
 
-    // ── Supprimer les réservations du user (en tant que client)
-    await db.from('bookings').delete().eq('user_id', id);
-
-    // ── Supprimer dans l'ordre FK
-    await db.from('commissions').delete().eq('user_id', id).catch(() => {});
-    await db.from('payments').delete().eq('user_id', id).catch(() => {});
+    // ─────────────────────────────────────────────────────────────
+    // 2. Nettoyage des données du user
+    // ⚠️ commissions n'a PAS de user_id (seulement booking_id + partner_id)
+    // ⚠️ donc PAS de db.from('commissions').delete().eq('user_id', id)
+    // ─────────────────────────────────────────────────────────────
+    await db.from('bookings').delete().eq('user_id', id).catch(() => {});
     await db.from('reviews').delete().eq('user_id', id).catch(() => {});
     await db.from('favorites').delete().eq('user_id', id).catch(() => {});
     await db.from('push_tokens').delete().eq('user_id', id).catch(() => {});
     await db.from('notifications').delete().eq('user_id', id).catch(() => {});
+    await db.from('payments').delete().eq('user_id', id).catch(() => {});
+    log.push('user-tables-cleaned');
 
-    // ── Supprimer l'utilisateur
-    const { error } = await db.from('users').delete().eq('id', id);
-    if (error) throw new Error(error.message);
+    // ─────────────────────────────────────────────────────────────
+    // 3. Supprimer l'user
+    // ─────────────────────────────────────────────────────────────
+    const { error: delErr } = await db.from('users').delete().eq('id', id);
+    if (delErr) {
+      console.error('[Admin] users.delete error:', delErr, log);
+      return res.status(500).json({
+        error: `Impossible de supprimer l'utilisateur : ${delErr.message}`,
+        log,
+      });
+    }
 
-    // ── Notifier l'admin (log)
-    console.log(`[Admin] User supprime: ${user.name} (${user.email})`);
+    // ─────────────────────────────────────────────────────────────
+    // 4. VÉRIFICATION POST-DELETE (critique)
+    // ─────────────────────────────────────────────────────────────
+    const { data: stillExists } = await db.from('users').select('id').eq('id', id).maybeSingle();
+    if (stillExists) {
+      console.error('[Admin] ❌ User still exists after delete!', id, log);
+      return res.status(500).json({
+        error: 'La suppression a echoue (utilisateur toujours present). Verifiez les FK CASCADE.',
+        log,
+      });
+    }
+
+    console.log(`[Admin] ✅ User deleted: ${user.name} (${user.email})`, log);
+    return res.json({
+      message: `Compte de ${user.name} supprime avec toutes ses donnees.`,
+      deleted: true,
+    });
 
   } catch (e) {
-    console.log('[Admin] Delete error:', e.message);
-    return res.status(500).json({ error: 'Erreur suppression: ' + e.message });
+    console.error('[Admin] Delete exception:', e.message, log);
+    return res.status(500).json({
+      error: 'Erreur suppression: ' + e.message,
+      log,
+    });
   }
-
-  res.json({ message: `Compte de ${user.name} supprime avec toutes ses donnees.` });
 }));
 
 
