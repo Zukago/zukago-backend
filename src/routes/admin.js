@@ -23,125 +23,42 @@ const safe = async (promiseLike, label = '') => {
 // ═══════════════════════════════════════════════════════════════════════════
 // GET /api/admin/partners — Liste des partenaires
 // ═══════════════════════════════════════════════════════════════════════════
-// Approche PRO : on part de la table USERS (source de vérité), pas de partners.
-// → Évite les bugs de relations Supabase (colonnes manquantes, etc.)
-// → 2 queries simples qui ne peuvent pas planter
-//
-// status=pending   → users avec demande_verified=true ET verified=false
-// status=approved  → users avec role='partner' ET verified=true
-// status=rejected  → partners avec status='rejected'
+// Approche SIMPLE et directe (suggestion Thomy) :
+// SELECT * FROM partners WHERE users.verified=false AND users.demande_verified=true
+// → 1 seule query avec INNER JOIN Supabase
 // ═══════════════════════════════════════════════════════════════════════════
 router.get('/partners', asyncHandler(async (req, res) => {
   const status = req.query.status || 'pending';
   console.log(`[Admin] GET /partners status=${status} by ${req.user?.email}`);
 
   try {
-    // ──────────────────────────────────────────────────────────────────────
-    // STEP 1 : Récupérer les users selon le status
-    // ──────────────────────────────────────────────────────────────────────
-    let usersQuery = db.from('users')
-      .select('id, name, email, avatar, role, demande_verified, verified, created_at');
+    // Query avec INNER JOIN sur users (le !inner force le join strict)
+    let query = db.from('partners')
+      .select('*, users!inner(id, name, email, avatar, role, verified, demande_verified)');
 
+    // Filtres selon le status
     if (status === 'pending') {
       // En attente = demande soumise MAIS admin n'a pas encore approuvé
-      usersQuery = usersQuery
-        .eq('demande_verified', true)
-        .eq('verified', false);
+      query = query
+        .eq('users.demande_verified', true)
+        .eq('users.verified', false);
     } else if (status === 'approved') {
       // Approuvé = admin a validé
-      usersQuery = usersQuery
-        .eq('verified', true)
-        .eq('role', 'partner');
-    }
-    // Pour 'rejected' on passera par la table partners ci-dessous
-
-    const { data: users, error: usersErr } = await usersQuery.order('created_at', { ascending: false });
-
-    if (usersErr) {
-      console.error(`[Admin] /partners users query error: ${usersErr.message}`);
-      return res.status(500).json({ error: usersErr.message, partners: [] });
+      query = query.eq('users.verified', true);
+    } else if (status === 'rejected') {
+      // Rejeté = partners.status = rejected
+      query = query.eq('status', 'rejected');
     }
 
-    console.log(`[Admin] /partners STEP1: ${users?.length || 0} users matching status=${status}`);
+    const { data, error } = await query.order('created_at', { ascending: false });
 
-    // Pour 'rejected', on fait différemment (via table partners directement)
-    if (status === 'rejected') {
-      const { data: rejectedPartners } = await db.from('partners')
-        .select('*').eq('status', 'rejected').order('created_at', { ascending: false });
-
-      if (!rejectedPartners?.length) {
-        console.log(`[Admin] /partners rejected: 0 rows`);
-        return res.json({ partners: [] });
-      }
-
-      // Hydrater les users
-      const userIds = rejectedPartners.map(p => p.user_id).filter(Boolean);
-      const { data: usersData } = await db.from('users')
-        .select('id, name, email, avatar, role').in('id', userIds);
-      const usersMap = {};
-      (usersData || []).forEach(u => { usersMap[u.id] = u; });
-
-      const enriched = rejectedPartners.map(p => ({ ...p, users: usersMap[p.user_id] || null }));
-      console.log(`[Admin] /partners rejected: ${enriched.length} rows`);
-      return res.json({ partners: enriched });
+    if (error) {
+      console.error(`[Admin] /partners error: ${error.message}`);
+      return res.status(500).json({ error: error.message, partners: [] });
     }
 
-    // ──────────────────────────────────────────────────────────────────────
-    // STEP 2 : Pour chaque user, récupérer sa ligne partners (si existe)
-    // ──────────────────────────────────────────────────────────────────────
-    if (!users?.length) {
-      console.log(`[Admin] /partners result: 0 rows`);
-      return res.json({ partners: [] });
-    }
-
-    const userIds = users.map(u => u.id);
-    const { data: partnersRows } = await db.from('partners')
-      .select('*').in('user_id', userIds);
-
-    const partnersMap = {};
-    (partnersRows || []).forEach(p => { partnersMap[p.user_id] = p; });
-
-    console.log(`[Admin] /partners STEP2: ${partnersRows?.length || 0} partner rows found`);
-
-    // ──────────────────────────────────────────────────────────────────────
-    // STEP 3 : Assembler le résultat
-    // Format compatible avec le frontend existant : partner + partner.users
-    // ──────────────────────────────────────────────────────────────────────
-    const result = users.map(u => {
-      const p = partnersMap[u.id] || {};
-      return {
-        // Données partners (ou valeurs par défaut si pas encore de ligne partners)
-        id:             p.id || null,
-        user_id:        u.id,
-        type:           p.type || 'proprietaire',
-        status:         p.status || (u.demande_verified ? 'pending' : null),
-        cni_number:     p.cni_number || null,
-        whatsapp:       p.whatsapp || null,
-        address:        p.address || null,
-        bio:            p.bio || null,
-        rejection_msg:  p.rejection_msg || null,
-        created_at:     p.created_at || u.created_at,
-        // Infos du user (format relation pour compat frontend)
-        users: {
-          id:               u.id,
-          name:             u.name,
-          email:            u.email,
-          avatar:           u.avatar,
-          role:             u.role,
-          verified:         u.verified,
-          demande_verified: u.demande_verified,
-        },
-      };
-    });
-
-    // Filtrer : on veut seulement ceux qui ont une vraie ligne partners (cni rempli)
-    // pour éviter d'afficher des users qui ont cliqué mais pas submit
-    const finalResult = status === 'pending'
-      ? result.filter(r => r.cni_number !== null)
-      : result;
-
-    console.log(`[Admin] /partners FINAL: ${finalResult.length} rows for status=${status}`);
-    res.json({ partners: finalResult });
+    console.log(`[Admin] /partners OK: ${data?.length || 0} rows for status=${status}`);
+    res.json({ partners: data || [] });
 
   } catch (e) {
     console.error(`[Admin] /partners exception: ${e.message}`);
