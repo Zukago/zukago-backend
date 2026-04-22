@@ -236,10 +236,31 @@ router.post('/logout', authenticate, asyncHandler(async (req, res) => {
 
 // GET /api/auth/me
 router.get('/me', authenticate, asyncHandler(async (req, res) => {
-  const { data: user } = await db.from('users')
+  console.log(`[Auth] GET /me by ${req.user?.email}`);
+
+  // Essai avec toutes les colonnes
+  const { data: user, error } = await db.from('users')
     .select('id, name, email, role, avatar, phone, whatsapp, verified, created_at')
     .eq('id', req.user.id)
-    .single();
+    .maybeSingle();
+
+  if (error || !user) {
+    console.log(`[Auth] /me fallback - error: ${error?.message || 'no user'}`);
+    // Fallback : seulement les colonnes qui existent sûrement
+    const { data: user2 } = await db.from('users')
+      .select('id, name, email, role, avatar, verified, created_at')
+      .eq('id', req.user.id)
+      .maybeSingle();
+
+    if (!user2) {
+      console.error('[Auth] /me fallback also failed');
+      return res.status(404).json({ error: 'Utilisateur introuvable' });
+    }
+    console.log(`[Auth] /me fallback OK - role=${user2.role}`);
+    return res.json({ user: user2 });
+  }
+
+  console.log(`[Auth] /me OK - role=${user.role}`);
   res.json({ user });
 }));
 
