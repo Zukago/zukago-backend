@@ -155,6 +155,8 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
   if (!whatsapp)   return res.status(400).json({ error: 'WhatsApp requis' });
   if (!address)    return res.status(400).json({ error: 'Adresse requise' });
 
+  console.log(`[Partners] POST /request by ${req.user.email}`);
+
   // Récupérer l'état actuel du user
   const { data: userRow } = await db.from('users')
     .select('id, role, verified, demande_verified').eq('id', req.user.id).maybeSingle();
@@ -170,9 +172,12 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
   const { data: existing } = await db.from('partners')
     .select('id, status').eq('user_id', req.user.id).maybeSingle();
 
+  // ═══ INSERT ou UPDATE dans partners ═══
+  let partnerSaveError = null;
+
   if (existing) {
     // Update existing (pending ou rejected → remettre en pending)
-    await db.from('partners').update({
+    const { error } = await db.from('partners').update({
       type:          type || 'proprietaire',
       cni_number,
       whatsapp,
@@ -181,9 +186,12 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
       status:        'pending',
       rejection_msg: null,
     }).eq('id', existing.id);
+    partnerSaveError = error;
+    if (error) console.error(`[Partners] UPDATE error: ${error.message}`);
+    else       console.log(`[Partners] ✅ UPDATE partner ${existing.id}`);
   } else {
     // Nouvelle demande
-    await db.from('partners').insert({
+    const { data: inserted, error } = await db.from('partners').insert({
       user_id:    req.user.id,
       type:       type || 'proprietaire',
       cni_number,
@@ -191,13 +199,22 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
       address,
       bio:        bio || '',
       status:     'pending',
+    }).select('id').maybeSingle();
+    partnerSaveError = error;
+    if (error) console.error(`[Partners] INSERT error: ${error.message}`);
+    else       console.log(`[Partners] ✅ INSERT partner ${inserted?.id}`);
+  }
+
+  // ⚠️ CRITIQUE : si la sauvegarde partners a échoué, on ARRETE ici
+  // Sinon on aurait users.demande_verified=true sans ligne partners → incohérence
+  if (partnerSaveError) {
+    return res.status(500).json({
+      error:   'Impossible de sauvegarder la demande : ' + partnerSaveError.message,
+      details: 'Colonne manquante ou contrainte DB. Contactez le support.',
     });
   }
 
-  // ✅ Update user :
-  //   - demande_verified = true (demande soumise)
-  //   - role = 'partner' (si c'était encore 'client')
-  //   - verified reste false (admin doit encore valider)
+  // ═══ UPDATE user : demande_verified=true + role=partner si client ═══
   const updates = { demande_verified: true };
   if (userRow.role !== 'partner' && userRow.role !== 'admin') {
     updates.role = 'partner';
@@ -205,7 +222,11 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
 
   const { error: updErr } = await db.from('users')
     .update(updates).eq('id', req.user.id);
-  if (updErr) console.log('[Partners] update user error:', updErr.message);
+  if (updErr) {
+    console.error(`[Partners] UPDATE user error: ${updErr.message}`);
+    return res.status(500).json({ error: 'Erreur MAJ user : ' + updErr.message });
+  }
+  console.log(`[Partners] ✅ User updated : role=${updates.role || userRow.role}, demande_verified=true`);
 
   // Notification aux admins
   const { data: admins } = await db.from('users')
@@ -221,10 +242,11 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
           type:    'partner',
         }))
       );
-    } catch(e) { console.log('[Partners] admin notif error:', e.message); }
+      console.log(`[Partners] ✅ ${admins.length} admin notifications sent`);
+    } catch(e) { console.log(`[Partners] admin notif error: ${e.message}`); }
   }
 
-  console.log(`[Partners] ✅ Request submitted by ${req.user.email}, role=${updates.role || userRow.role}, demande_verified=true`);
+  console.log(`[Partners] ✅ DONE - Request submitted by ${req.user.email}`);
   res.json({ message: 'Demande soumise avec succès. Vérification sous 24-48h.' });
 }));
 
