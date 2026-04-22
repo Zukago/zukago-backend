@@ -14,10 +14,44 @@ router.use(authenticate, requireAdmin);
 // GET /api/admin/partners — Liste des partenaires en attente
 router.get('/partners', asyncHandler(async (req, res) => {
   const status = req.query.status || 'pending';
-  const { data } = await db.from('partners')
+  console.log(`[Admin] GET /partners status=${status} by ${req.user?.email}`);
+
+  // Essai avec relation users
+  const { data, error } = await db.from('partners')
     .select('*, users(name, email, phone, avatar, whatsapp)')
     .eq('status', status)
     .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('[Admin] /partners error with users relation:', error.message);
+
+    // Fallback : sans la relation users (au cas où phone/whatsapp/avatar n'existent pas)
+    const { data: partners2, error: err2 } = await db.from('partners')
+      .select('*')
+      .eq('status', status)
+      .order('created_at', { ascending: false });
+
+    if (err2) {
+      console.error('[Admin] /partners fallback error:', err2.message);
+      return res.status(500).json({ error: err2.message, partners: [] });
+    }
+
+    // Hydrater manuellement les users
+    const userIds = (partners2 || []).map(p => p.user_id).filter(Boolean);
+    let usersMap = {};
+    if (userIds.length) {
+      const { data: usersData } = await db.from('users')
+        .select('id, name, email, avatar')
+        .in('id', userIds);
+      (usersData || []).forEach(u => { usersMap[u.id] = u; });
+    }
+    const enriched = (partners2 || []).map(p => ({ ...p, users: usersMap[p.user_id] || null }));
+
+    console.log(`[Admin] /partners fallback OK, ${enriched.length} rows`);
+    return res.json({ partners: enriched });
+  }
+
+  console.log(`[Admin] /partners OK, ${(data || []).length} rows`);
   res.json({ partners: data || [] });
 }));
 
