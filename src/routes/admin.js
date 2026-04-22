@@ -57,45 +57,81 @@ router.get('/partners', asyncHandler(async (req, res) => {
 
 // PATCH /api/admin/partners/:id/approve — Approuver partenaire
 router.patch('/partners/:id/approve', asyncHandler(async (req, res) => {
-  const { data: partner } = await db.from('partners')
-    .select('*, users(name, email)').eq('id', req.params.id).single();
-  if (!partner) return res.status(404).json({ error: 'Partenaire introuvable' });
+  console.log(`[Admin] PATCH /partners/${req.params.id}/approve by ${req.user?.email}`);
 
-  await db.from('partners').update({
+  // Récupérer le partner (sans la relation users qui peut foirer)
+  const { data: partner, error: pErr } = await db.from('partners')
+    .select('*').eq('id', req.params.id).maybeSingle();
+
+  if (pErr) {
+    console.error('[Admin] approve - partner query error:', pErr.message);
+    return res.status(500).json({ error: pErr.message });
+  }
+  if (!partner) {
+    console.warn(`[Admin] approve - partner ${req.params.id} not found`);
+    return res.status(404).json({ error: 'Partenaire introuvable' });
+  }
+
+  // Récupérer le user séparément pour l'email et la notif
+  const { data: user } = await db.from('users')
+    .select('id, name, email').eq('id', partner.user_id).maybeSingle();
+
+  // Update du partner
+  const { error: uErr } = await db.from('partners').update({
     status: 'approved',
     approved_by: req.user.id,
     approved_at: new Date(),
   }).eq('id', req.params.id);
 
-  await db.from('users').update({ role: 'partner' }).eq('id', partner.user_id);
+  if (uErr) {
+    console.error('[Admin] approve - update error:', uErr.message);
+    return res.status(500).json({ error: uErr.message });
+  }
+
+  // Update du rôle user
+  await db.from('users').update({ role: 'partner' }).eq('id', partner.user_id).catch(e => {
+    console.log('[Admin] approve - user role update error:', e.message);
+  });
 
   // Notification in-app
   try {
     await db.from('notifications').insert({
       user_id: partner.user_id,
       title: '🎉 Compte partenaire approuvé !',
-      body: `Bienvenue ${partner.users.name} ! Vous pouvez maintenant publier vos annonces sur ZUKAGO.`,
+      body: `Bienvenue ${user?.name || ''} ! Vous pouvez maintenant publier vos annonces sur ZUKAGO.`,
       type: 'info',
     });
   } catch(e) { console.log('Notif partner approve error:', e.message); }
 
-  // Email de confirmation
-  try { await emailService.sendPartnerApproved(partner.users); } catch(e) {}
+  // Email
+  if (user?.email) {
+    try { await emailService.sendPartnerApproved(user); } catch(e) { console.log('Email approve error:', e.message); }
+  }
 
-  // Mettre à jour stats_daily
-  statsService.updateDay();
+  // Stats
+  try { statsService.updateDay(); } catch(e) {}
 
-  res.json({ message: `Partenaire ${partner.users.name} approuvé` });
+  console.log(`[Admin] ✅ Partner ${req.params.id} approved (${user?.email})`);
+  res.json({ message: `Partenaire ${user?.name || ''} approuvé` });
 }));
 
 // PATCH /api/admin/partners/:id/reject — Rejeter partenaire
 router.patch('/partners/:id/reject', asyncHandler(async (req, res) => {
   const { message } = req.body;
-  const { data: partner } = await db.from('partners')
-    .select('*, users(name, email)').eq('id', req.params.id).single();
+  console.log(`[Admin] PATCH /partners/${req.params.id}/reject by ${req.user?.email}`);
+
+  const { data: partner, error: pErr } = await db.from('partners')
+    .select('*').eq('id', req.params.id).maybeSingle();
+  if (pErr)    return res.status(500).json({ error: pErr.message });
   if (!partner) return res.status(404).json({ error: 'Partenaire introuvable' });
 
-  await db.from('partners').update({ status: 'rejected', rejection_msg: message }).eq('id', req.params.id);
+  const { data: user } = await db.from('users')
+    .select('id, name, email').eq('id', partner.user_id).maybeSingle();
+
+  const { error: uErr } = await db.from('partners')
+    .update({ status: 'rejected', rejection_msg: message || null })
+    .eq('id', req.params.id);
+  if (uErr) return res.status(500).json({ error: uErr.message });
 
   // Notification in-app
   try {
@@ -107,8 +143,11 @@ router.patch('/partners/:id/reject', asyncHandler(async (req, res) => {
     });
   } catch(e) { console.log('Notif partner reject error:', e.message); }
 
-  try { await emailService.sendPartnerRejected(partner.users, message); } catch(e) {}
+  if (user) {
+    try { await emailService.sendPartnerRejected(user, message); } catch(e) { console.log('Email reject error:', e.message); }
+  }
 
+  console.log(`[Admin] ✅ Partner ${req.params.id} rejected`);
   res.json({ message: 'Partenaire rejeté' });
 }));
 
