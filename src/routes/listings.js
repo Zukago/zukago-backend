@@ -117,24 +117,28 @@ router.post('/', authenticate, requirePartner, [
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  // Récupérer partner_id
+  // Récupérer partner_id — l'utilisateur DOIT être un partenaire approuvé
   const { data: partner } = await db.from('partners')
     .select('id, status').eq('user_id', req.user.id).single();
 
-  // Si pas de partner → créer automatiquement
-  let partnerId;
   if (!partner) {
-    const { data: newPartner } = await db.from('partners')
-      .insert({ user_id: req.user.id, type: 'proprietaire', status: 'approved' })
-      .select().single();
-    partnerId = newPartner?.id;
-  } else {
-    // Auto-approuver si role=partner dans users
-    if (partner.status !== 'approved') {
-      await db.from('partners').update({ status: 'approved' }).eq('id', partner.id);
-    }
-    partnerId = partner.id;
+    return res.status(403).json({
+      error: 'Vous devez soumettre une demande partenaire avant de publier',
+      reason: 'no_partner_profile',
+    });
   }
+  if (partner.status !== 'approved') {
+    return res.status(403).json({
+      error: partner.status === 'pending'
+        ? 'Votre demande partenaire est en cours de vérification'
+        : partner.status === 'rejected'
+          ? 'Votre demande partenaire a été rejetée. Contactez le support.'
+          : 'Votre compte partenaire n\'est pas actif',
+      reason: 'partner_not_approved',
+      status: partner.status,
+    });
+  }
+  const partnerId = partner.id;
 
   const { type, title, description, sub_type, city_code, city_name, quartier, address,
           price, price_weekend, unit, min_nights, caution, whatsapp, contact_email, amenities } = req.body;
