@@ -21,44 +21,82 @@ const safe = async (promiseLike, label = '') => {
 // ─── PARTENAIRES ─────────────────────────────────────────────────────────────
 
 // ═══════════════════════════════════════════════════════════════════════════
-// GET /api/admin/partners — Liste des partenaires
-// ═══════════════════════════════════════════════════════════════════════════
-// Approche SIMPLE et directe (suggestion Thomy) :
-// SELECT * FROM partners WHERE users.verified=false AND users.demande_verified=true
-// → 1 seule query avec INNER JOIN Supabase
+// GET /api/admin/partners — Liste des partenaires (2 queries fiables)
 // ═══════════════════════════════════════════════════════════════════════════
 router.get('/partners', asyncHandler(async (req, res) => {
   const status = req.query.status || 'pending';
   console.log(`[Admin] GET /partners status=${status} by ${req.user?.email}`);
 
   try {
-    // Query avec INNER JOIN sur users (le !inner force le join strict)
-    let query = db.from('partners')
-      .select('*, users!inner(id, name, email, avatar, role, verified, demande_verified)');
+    // ─── STEP 1 : Trouver les user_ids matching le status ───
+    let userIds = [];
 
-    // Filtres selon le status
     if (status === 'pending') {
-      // En attente = demande soumise MAIS admin n'a pas encore approuvé
-      query = query
-        .eq('users.demande_verified', true)
-        .eq('users.verified', false);
+      // users avec demande_verified=true ET verified=false
+      const { data: users, error: uErr } = await db.from('users')
+        .select('id')
+        .eq('demande_verified', true)
+        .eq('verified', false);
+      if (uErr) {
+        console.error(`[Admin] /partners users error: ${uErr.message}`);
+        return res.status(500).json({ error: uErr.message, partners: [] });
+      }
+      userIds = (users || []).map(u => u.id);
+      console.log(`[Admin] /partners STEP1: ${userIds.length} users with demande=true AND verified=false`);
+
     } else if (status === 'approved') {
-      // Approuvé = admin a validé
-      query = query.eq('users.verified', true);
-    } else if (status === 'rejected') {
-      // Rejeté = partners.status = rejected
-      query = query.eq('status', 'rejected');
+      const { data: users } = await db.from('users')
+        .select('id').eq('verified', true).eq('role', 'partner');
+      userIds = (users || []).map(u => u.id);
+      console.log(`[Admin] /partners STEP1: ${userIds.length} approved users`);
+    }
+    // status='rejected' → pas besoin, on filtrera sur partners.status
+
+    // Si pending/approved mais 0 users, retour vide
+    if ((status === 'pending' || status === 'approved') && userIds.length === 0) {
+      console.log(`[Admin] /partners: 0 rows (no users match status=${status})`);
+      return res.json({ partners: [] });
     }
 
-    const { data, error } = await query.order('created_at', { ascending: false });
+    // ─── STEP 2 : Récupérer les lignes partners pour ces users ───
+    let partnersQuery = db.from('partners').select('*');
 
-    if (error) {
-      console.error(`[Admin] /partners error: ${error.message}`);
-      return res.status(500).json({ error: error.message, partners: [] });
+    if (status === 'rejected') {
+      partnersQuery = partnersQuery.eq('status', 'rejected');
+    } else {
+      partnersQuery = partnersQuery.in('user_id', userIds);
     }
 
-    console.log(`[Admin] /partners OK: ${data?.length || 0} rows for status=${status}`);
-    res.json({ partners: data || [] });
+    const { data: partners, error: pErr } = await partnersQuery
+      .order('created_at', { ascending: false });
+
+    if (pErr) {
+      console.error(`[Admin] /partners partners error: ${pErr.message}`);
+      return res.status(500).json({ error: pErr.message, partners: [] });
+    }
+
+    console.log(`[Admin] /partners STEP2: ${partners?.length || 0} partner rows found`);
+
+    if (!partners?.length) {
+      return res.json({ partners: [] });
+    }
+
+    // ─── STEP 3 : Hydrater avec les infos users ───
+    const partnerUserIds = partners.map(p => p.user_id).filter(Boolean);
+    const { data: usersData } = await db.from('users')
+      .select('id, name, email, avatar, role, verified, demande_verified')
+      .in('id', partnerUserIds);
+
+    const usersMap = {};
+    (usersData || []).forEach(u => { usersMap[u.id] = u; });
+
+    const result = partners.map(p => ({
+      ...p,
+      users: usersMap[p.user_id] || null,
+    }));
+
+    console.log(`[Admin] /partners FINAL: ${result.length} rows for status=${status}`);
+    res.json({ partners: result });
 
   } catch (e) {
     console.error(`[Admin] /partners exception: ${e.message}`);
