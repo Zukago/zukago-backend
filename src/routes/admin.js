@@ -20,16 +20,18 @@ const safe = async (promiseLike, label = '') => {
 
 // ─── PARTENAIRES ─────────────────────────────────────────────────────────────
 
-// GET /api/admin/partners — Liste des partenaires
+// GET /api/admin/partners — Liste des partenaires (filtrés par demande_verified)
 router.get('/partners', asyncHandler(async (req, res) => {
   const status = req.query.status || 'pending';
   console.log(`[Admin] GET /partners status=${status} by ${req.user?.email}`);
 
   // Essai avec relation users complète
   const { data, error } = await db.from('partners')
-    .select('*, users(name, email, phone, avatar, whatsapp)')
+    .select('*, users(id, name, email, phone, avatar, whatsapp, verified, demande_verified)')
     .eq('status', status)
     .order('created_at', { ascending: false });
+
+  let result;
 
   if (error) {
     console.error('[Admin] /partners error with users relation:', error.message);
@@ -48,17 +50,22 @@ router.get('/partners', asyncHandler(async (req, res) => {
     let usersMap = {};
     if (userIds.length) {
       const { data: usersData } = await db.from('users')
-        .select('id, name, email, avatar').in('id', userIds);
+        .select('id, name, email, avatar, verified, demande_verified').in('id', userIds);
       (usersData || []).forEach(u => { usersMap[u.id] = u; });
     }
-    const enriched = (partners2 || []).map(p => ({ ...p, users: usersMap[p.user_id] || null }));
-
-    console.log(`[Admin] /partners fallback OK, ${enriched.length} rows`);
-    return res.json({ partners: enriched });
+    result = (partners2 || []).map(p => ({ ...p, users: usersMap[p.user_id] || null }));
+  } else {
+    result = data || [];
   }
 
-  console.log(`[Admin] /partners OK, ${(data || []).length} rows`);
-  res.json({ partners: data || [] });
+  // ✅ FILTRAGE : pour les pending, n'afficher que ceux dont l'user.demande_verified = true
+  // (protection contre les partners auto-créés par erreur)
+  if (status === 'pending') {
+    result = result.filter(p => p.users?.demande_verified === true);
+  }
+
+  console.log(`[Admin] /partners OK, ${result.length} rows after filter`);
+  res.json({ partners: result });
 }));
 
 // PATCH /api/admin/partners/:id/approve — Approuver partenaire
@@ -126,12 +133,18 @@ router.patch('/partners/:id/reject', asyncHandler(async (req, res) => {
     .eq('id', req.params.id);
   if (uErr) return res.status(500).json({ error: uErr.message });
 
+  // ✅ Reset demande_verified = false pour que le user puisse refaire une demande
+  await safe(
+    db.from('users').update({ demande_verified: false }).eq('id', partner.user_id),
+    'reject-reset-demande'
+  );
+
   // Notification in-app
   try {
     await db.from('notifications').insert({
       user_id: partner.user_id,
       title: 'Demande partenaire refusée',
-      body: `Votre demande partenaire n'a pas ete approuvee. ${message ? 'Raison : ' + message : 'Contactez le support.'}`,
+      body: `Votre demande partenaire n'a pas ete approuvee. ${message ? 'Raison : ' + message : 'Contactez le support.'} Vous pouvez soumettre une nouvelle demande.`,
       type: 'info',
     });
   } catch(e) { console.log('Notif partner reject error:', e.message); }
@@ -140,7 +153,7 @@ router.patch('/partners/:id/reject', asyncHandler(async (req, res) => {
     try { await emailService.sendPartnerRejected(user, message); } catch(e) { console.log('Email reject error:', e.message); }
   }
 
-  console.log(`[Admin] ✅ Partner ${req.params.id} rejected`);
+  console.log(`[Admin] ✅ Partner ${req.params.id} rejected, demande_verified reset to false`);
   res.json({ message: 'Partenaire rejeté' });
 }));
 

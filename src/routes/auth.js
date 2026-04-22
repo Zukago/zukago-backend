@@ -62,11 +62,12 @@ router.post('/register', registerLimiter, [
     name, email,
     password: hashedPassword,
     role,
-    provider:       'email',
-    verified:       false,
-    verify_token:   verifyToken,
-    verify_expires: verifyExpires,
-  }).select('id, name, email, role').single();
+    provider:          'email',
+    verified:          false,
+    demande_verified:  false,
+    verify_token:      verifyToken,
+    verify_expires:    verifyExpires,
+  }).select('id, name, email, role, verified, demande_verified').single();
 
   if (error) throw new Error(error.message);
 
@@ -98,7 +99,7 @@ router.post('/login', loginLimiter, [
 
   const { data: user } = await db
     .from('users')
-    .select('id, name, email, role, password, active, avatar, verified')
+    .select('id, name, email, role, password, active, avatar, verified, demande_verified')
     .eq('email', email)
     .single();
 
@@ -174,13 +175,14 @@ router.post('/google', asyncHandler(async (req, res) => {
 
   if (!user) {
     const { data: newUser, error } = await db.from('users').insert({
-      name:     verifiedName || verifiedEmail.split('@')[0],
-      email:    verifiedEmail,
-      avatar:   verifiedAvatar,
-      provider: 'google',
-      role:     'client',
-      verified: true,
-    }).select('id, name, email, role, avatar').single();
+      name:              verifiedName || verifiedEmail.split('@')[0],
+      email:             verifiedEmail,
+      avatar:            verifiedAvatar,
+      provider:          'google',
+      role:              'client',
+      verified:          true,
+      demande_verified:  false,
+    }).select('id, name, email, role, avatar, verified, demande_verified').single();
     if (error) throw new Error(error.message);
     user = newUser;
     try { await emailService.sendWelcome(user); } catch(e) {}
@@ -238,29 +240,26 @@ router.post('/logout', authenticate, asyncHandler(async (req, res) => {
 router.get('/me', authenticate, asyncHandler(async (req, res) => {
   console.log(`[Auth] GET /me by ${req.user?.email}`);
 
-  // Essai avec toutes les colonnes
+  // Essai complet
   const { data: user, error } = await db.from('users')
-    .select('id, name, email, role, avatar, phone, whatsapp, verified, created_at')
+    .select('id, name, email, role, avatar, phone, whatsapp, verified, demande_verified, created_at')
     .eq('id', req.user.id)
     .maybeSingle();
 
   if (error || !user) {
-    console.log(`[Auth] /me fallback - error: ${error?.message || 'no user'}`);
-    // Fallback : seulement les colonnes qui existent sûrement
+    console.log(`[Auth] /me fallback - ${error?.message || 'no user'}`);
+    // Fallback : seulement colonnes sûres
     const { data: user2 } = await db.from('users')
-      .select('id, name, email, role, avatar, verified, created_at')
+      .select('id, name, email, role, avatar, verified, demande_verified, created_at')
       .eq('id', req.user.id)
       .maybeSingle();
 
-    if (!user2) {
-      console.error('[Auth] /me fallback also failed');
-      return res.status(404).json({ error: 'Utilisateur introuvable' });
-    }
-    console.log(`[Auth] /me fallback OK - role=${user2.role}`);
+    if (!user2) return res.status(404).json({ error: 'Utilisateur introuvable' });
+    console.log(`[Auth] /me fallback OK - role=${user2.role}, demande_verified=${user2.demande_verified}`);
     return res.json({ user: user2 });
   }
 
-  console.log(`[Auth] /me OK - role=${user.role}`);
+  console.log(`[Auth] /me OK - role=${user.role}, demande_verified=${user.demande_verified}`);
   res.json({ user });
 }));
 
