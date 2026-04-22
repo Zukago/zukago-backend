@@ -12,6 +12,7 @@ const APP_URL         = process.env.APP_URL          || 'https://zukago.com';
 
 // EU region — api.eu.mailgun.net
 const MAILGUN_BASE = `https://api.eu.mailgun.net/v3/${MAILGUN_DOMAIN}/messages`;
+// Note: EU region utilise api.eu.mailgun.net (pas api.mailgun.net)
 
 /**
  * Envoyer un email via Mailgun API REST
@@ -42,9 +43,11 @@ async function sendEmail({ to, subject, html, text }) {
 
     const data = await response.json();
     if (!response.ok) {
-      console.log('[emailService] Mailgun error:', data.message);
+      console.log('[emailService] Mailgun error:', response.status, JSON.stringify(data));
+      console.log('[emailService] URL:', MAILGUN_BASE);
+      console.log('[emailService] Domain:', MAILGUN_DOMAIN);
     } else {
-      console.log('[emailService] Email envoyé à', to, ':', subject);
+      console.log('[emailService] Email envoye a', to, ':', subject, '| ID:', data.id);
     }
     return data;
   } catch (e) {
