@@ -9,191 +9,72 @@ const statsService      = require('../services/statsService');
 const router = express.Router();
 router.use(authenticate, requireAdmin);
 
-// ═══════════════════════════════════════════════════════════════════════════
-// HELPER — Exécuter une query Supabase sans planter en cas d'erreur
-// (Supabase queries n'ont pas .catch() natif, il faut await dans try/catch)
-// ═══════════════════════════════════════════════════════════════════════════
-const safe = async (promiseLike, label = '') => {
-  try { return await promiseLike; }
-  catch (e) { if (label) console.log(`[safe] ${label}: ${e.message}`); return null; }
-};
-
 // ─── PARTENAIRES ─────────────────────────────────────────────────────────────
 
-// ═══════════════════════════════════════════════════════════════════════════
-// GET /api/admin/partners — Liste des partenaires (2 queries fiables)
-// ═══════════════════════════════════════════════════════════════════════════
+// GET /api/admin/partners — Liste des partenaires en attente
 router.get('/partners', asyncHandler(async (req, res) => {
   const status = req.query.status || 'pending';
-  console.log(`[Admin] GET /partners status=${status} by ${req.user?.email}`);
-
-  try {
-    // ─── STEP 1 : Trouver les user_ids matching le status ───
-    let userIds = [];
-
-    if (status === 'pending') {
-      // users avec demande_verified=true ET verified=false
-      const { data: users, error: uErr } = await db.from('users')
-        .select('id')
-        .eq('demande_verified', true)
-        .eq('verified', false);
-      if (uErr) {
-        console.error(`[Admin] /partners users error: ${uErr.message}`);
-        return res.status(500).json({ error: uErr.message, partners: [] });
-      }
-      userIds = (users || []).map(u => u.id);
-      console.log(`[Admin] /partners STEP1: ${userIds.length} users with demande=true AND verified=false`);
-
-    } else if (status === 'approved') {
-      const { data: users } = await db.from('users')
-        .select('id').eq('verified', true).eq('role', 'partner');
-      userIds = (users || []).map(u => u.id);
-      console.log(`[Admin] /partners STEP1: ${userIds.length} approved users`);
-    }
-    // status='rejected' → pas besoin, on filtrera sur partners.status
-
-    // Si pending/approved mais 0 users, retour vide
-    if ((status === 'pending' || status === 'approved') && userIds.length === 0) {
-      console.log(`[Admin] /partners: 0 rows (no users match status=${status})`);
-      return res.json({ partners: [] });
-    }
-
-    // ─── STEP 2 : Récupérer les lignes partners pour ces users ───
-    let partnersQuery = db.from('partners').select('*');
-
-    if (status === 'rejected') {
-      partnersQuery = partnersQuery.eq('status', 'rejected');
-    } else {
-      partnersQuery = partnersQuery.in('user_id', userIds);
-    }
-
-    const { data: partners, error: pErr } = await partnersQuery
-      .order('created_at', { ascending: false });
-
-    if (pErr) {
-      console.error(`[Admin] /partners partners error: ${pErr.message}`);
-      return res.status(500).json({ error: pErr.message, partners: [] });
-    }
-
-    console.log(`[Admin] /partners STEP2: ${partners?.length || 0} partner rows found`);
-
-    if (!partners?.length) {
-      return res.json({ partners: [] });
-    }
-
-    // ─── STEP 3 : Hydrater avec les infos users ───
-    const partnerUserIds = partners.map(p => p.user_id).filter(Boolean);
-    const { data: usersData } = await db.from('users')
-      .select('id, name, email, avatar, role, verified, demande_verified')
-      .in('id', partnerUserIds);
-
-    const usersMap = {};
-    (usersData || []).forEach(u => { usersMap[u.id] = u; });
-
-    const result = partners.map(p => ({
-      ...p,
-      users: usersMap[p.user_id] || null,
-    }));
-
-    console.log(`[Admin] /partners FINAL: ${result.length} rows for status=${status}`);
-    res.json({ partners: result });
-
-  } catch (e) {
-    console.error(`[Admin] /partners exception: ${e.message}`);
-    res.status(500).json({ error: e.message, partners: [] });
-  }
+  const { data } = await db.from('partners')
+    .select('*, users(name, email, phone, avatar, whatsapp)')
+    .eq('status', status)
+    .order('created_at', { ascending: false });
+  res.json({ partners: data || [] });
 }));
 
 // PATCH /api/admin/partners/:id/approve — Approuver partenaire
 router.patch('/partners/:id/approve', asyncHandler(async (req, res) => {
-  console.log(`[Admin] PATCH /partners/${req.params.id}/approve by ${req.user?.email}`);
+  const { data: partner } = await db.from('partners')
+    .select('*, users(name, email)').eq('id', req.params.id).single();
+  if (!partner) return res.status(404).json({ error: 'Partenaire introuvable' });
 
-  // Récupérer le partner SEUL (sans relation users qui peut foirer)
-  const { data: partner, error: pErr } = await db.from('partners')
-    .select('*').eq('id', req.params.id).maybeSingle();
-  if (pErr)    { console.error('[Admin] approve query error:', pErr.message); return res.status(500).json({ error: pErr.message }); }
-  if (!partner) { console.warn(`[Admin] approve - partner ${req.params.id} not found`); return res.status(404).json({ error: 'Partenaire introuvable' }); }
-
-  // Récupérer le user séparément
-  const { data: user } = await db.from('users')
-    .select('id, name, email').eq('id', partner.user_id).maybeSingle();
-
-  // Update status partner
-  const { error: uErr } = await db.from('partners').update({
+  await db.from('partners').update({
     status: 'approved',
     approved_by: req.user.id,
     approved_at: new Date(),
   }).eq('id', req.params.id);
-  if (uErr) { console.error('[Admin] approve update error:', uErr.message); return res.status(500).json({ error: uErr.message }); }
 
-  // ✅ Update user : role='partner' + verified=true (admin a approuvé)
-  await safe(
-    db.from('users').update({ role: 'partner', verified: true }).eq('id', partner.user_id),
-    'approve-user-verified'
-  );
+  await db.from('users').update({ role: 'partner' }).eq('id', partner.user_id);
 
   // Notification in-app
   try {
     await db.from('notifications').insert({
       user_id: partner.user_id,
       title: '🎉 Compte partenaire approuvé !',
-      body: `Bienvenue ${user?.name || ''} ! Vous pouvez maintenant publier vos annonces sur ZUKAGO.`,
+      body: `Bienvenue ${partner.users.name} ! Vous pouvez maintenant publier vos annonces sur ZUKAGO.`,
       type: 'info',
     });
   } catch(e) { console.log('Notif partner approve error:', e.message); }
 
-  // Email
-  if (user?.email) {
-    try { await emailService.sendPartnerApproved(user); } catch(e) { console.log('Email approve error:', e.message); }
-  }
+  // Email de confirmation
+  try { await emailService.sendPartnerApproved(partner.users); } catch(e) {}
 
-  // Stats
-  try { statsService.updateDay(); } catch(e) {}
+  // Mettre à jour stats_daily
+  statsService.updateDay();
 
-  console.log(`[Admin] ✅ Partner ${req.params.id} approved (${user?.email || ''})`);
-  res.json({ message: `Partenaire ${user?.name || ''} approuvé` });
+  res.json({ message: `Partenaire ${partner.users.name} approuvé` });
 }));
 
 // PATCH /api/admin/partners/:id/reject — Rejeter partenaire
 router.patch('/partners/:id/reject', asyncHandler(async (req, res) => {
   const { message } = req.body;
-  console.log(`[Admin] PATCH /partners/${req.params.id}/reject by ${req.user?.email}`);
-
-  const { data: partner, error: pErr } = await db.from('partners')
-    .select('*').eq('id', req.params.id).maybeSingle();
-  if (pErr)    return res.status(500).json({ error: pErr.message });
+  const { data: partner } = await db.from('partners')
+    .select('*, users(name, email)').eq('id', req.params.id).single();
   if (!partner) return res.status(404).json({ error: 'Partenaire introuvable' });
 
-  const { data: user } = await db.from('users')
-    .select('id, name, email').eq('id', partner.user_id).maybeSingle();
-
-  const { error: uErr } = await db.from('partners')
-    .update({ status: 'rejected', rejection_msg: message || null })
-    .eq('id', req.params.id);
-  if (uErr) return res.status(500).json({ error: uErr.message });
-
-  // ✅ Reset user : demande_verified=false + verified=false
-  // (le user peut refaire une demande, role reste 'partner' pour qu'il voit le bouton Publier)
-  await safe(
-    db.from('users').update({ demande_verified: false, verified: false }).eq('id', partner.user_id),
-    'reject-reset-user'
-  );
+  await db.from('partners').update({ status: 'rejected', rejection_msg: message }).eq('id', req.params.id);
 
   // Notification in-app
   try {
     await db.from('notifications').insert({
       user_id: partner.user_id,
       title: 'Demande partenaire refusée',
-      body: `Votre demande partenaire n'a pas ete approuvee. ${message ? 'Raison : ' + message : 'Contactez le support.'} Vous pouvez soumettre une nouvelle demande.`,
+      body: `Votre demande partenaire n'a pas ete approuvee. ${message ? 'Raison : ' + message : 'Contactez le support.'}`,
       type: 'info',
     });
   } catch(e) { console.log('Notif partner reject error:', e.message); }
 
-  if (user) {
-    try { await emailService.sendPartnerRejected(user, message); } catch(e) { console.log('Email reject error:', e.message); }
-  }
+  try { await emailService.sendPartnerRejected(partner.users, message); } catch(e) {}
 
-  console.log(`[Admin] ✅ Partner ${req.params.id} rejected, demande_verified reset to false`);
   res.json({ message: 'Partenaire rejeté' });
 }));
 
@@ -451,28 +332,20 @@ router.post('/notifications/send', asyncHandler(async (req, res) => {
 
 // GET /api/admin/stats
 router.get('/stats', asyncHandler(async (req, res) => {
-  // ✅ Count pending partners avec le MÊME filtre que GET /admin/partners
-  // → users avec demande_verified=true ET verified=false
-  const { count: pendingPartners } = await db.from('users')
-    .select('*', { count: 'exact', head: true })
-    .eq('demande_verified', true)
-    .eq('verified', false);
-
   const [
     { count: totalUsers },
     { count: totalListings },
     { count: totalBookings },
+    { count: pendingPartners },
     { count: pendingListings },
     { count: pendingWithdrawals },
-    { count: totalPartners },
   ] = await Promise.all([
     db.from('users').select('*', { count: 'exact', head: true }),
     db.from('listings').select('*', { count: 'exact', head: true }).eq('status', 'active'),
     db.from('bookings').select('*', { count: 'exact', head: true }),
+    db.from('partners').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
     db.from('listings').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
     db.from('withdrawals').select('*', { count: 'exact', head: true }).eq('status', 'pending'),
-    // ✅ Partenaires totaux = users avec verified=true (admin a approuvé)
-    db.from('users').select('*', { count: 'exact', head: true }).eq('verified', true).eq('role', 'partner'),
   ]);
 
   const commStats = await commissionService.getStats('month');
@@ -483,7 +356,6 @@ router.get('/stats', asyncHandler(async (req, res) => {
     listings: totalListings,
     bookings: totalBookings,
     pendingPartners,
-    partenairesTotal: totalPartners,
     pendingListings,
     pendingWithdrawals,
     revenusMois: commStats.total,
@@ -606,121 +478,142 @@ router.patch('/users/:id/suspend', asyncHandler(async (req, res) => {
   await db.from('users').update({ active }).eq('id', req.params.id);
 
   // Notif in-app
-  await safe(db.from('notifications').insert({
+  await db.from('notifications').insert({
     user_id: req.params.id,
     title: active ? 'Compte réactivé' : 'Compte suspendu',
     body:  active ? 'Votre compte ZUKAGO a été réactivé.' : 'Votre compte a été suspendu. Contactez le support.',
     type:  'info',
-  }));
+  }).catch(() => {});
 
   res.json({ message: `Compte ${user.name} ${active ? 'réactivé' : 'suspendu'}` });
 }));
 
-// DELETE /api/admin/users/:id — Supprimer compte + cascade + vérification
+// DELETE /api/admin/users/:id — Supprimer compte + cascade complète
 router.delete('/users/:id', asyncHandler(async (req, res) => {
   const { id } = req.params;
-  console.log(`[Admin] DELETE /users/${id} by ${req.user?.email}`);
 
   const { data: user } = await db.from('users')
-    .select('id, name, email, role').eq('id', id).maybeSingle();
-  if (!user)                    return res.status(404).json({ error: 'Utilisateur introuvable' });
-  if (user.role === 'admin')    return res.status(403).json({ error: 'Impossible de supprimer un admin' });
-  if (user.id === req.user.id)  return res.status(403).json({ error: 'Impossible de supprimer votre propre compte' });
+    .select('id, name, email, role').eq('id', id).single();
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  if (user.role === 'admin') return res.status(403).json({ error: 'Impossible de supprimer un admin' });
+  if (user.id === req.user.id) return res.status(403).json({ error: 'Impossible de supprimer votre propre compte' });
 
+  const { deleteImage } = require('../config/cloudinary');
   const log = [];
 
   try {
-    // ─────────────────────────────────────────────────────────────
-    // 1. Si partenaire → cascade sur annonces
-    // ─────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────
+    // 1. Si PARTENAIRE → cascade totale sur ses annonces
+    // ─────────────────────────────────────────────────────────────────
     const { data: partner } = await db.from('partners')
-      .select('id').eq('user_id', id).maybeSingle();
+      .select('id').eq('user_id', id).single();
 
     if (partner) {
-      log.push(`partner=${partner.id}`);
+      log.push(`Partner found: ${partner.id}`);
 
+      // 1a. Récupérer toutes ses annonces
       const { data: listings } = await db.from('listings')
         .select('id, title').eq('partner_id', partner.id);
       const listingIds = (listings || []).map(l => l.id);
-      log.push(`listings=${listingIds.length}`);
+      log.push(`Listings: ${listingIds.length}`);
 
       if (listingIds.length) {
-        // Notifier clients avec réservations actives
+        // 1b. Clients avec réservations actives → notifier + annuler
         const { data: activeBookings } = await db.from('bookings')
-          .select('user_id').in('listing_id', listingIds)
+          .select('id, user_id, status')
+          .in('listing_id', listingIds)
           .in('status', ['pending', 'confirmed']);
 
         if (activeBookings?.length) {
-          const uniqueClients = [...new Set(activeBookings.map(b => b.user_id))];
-          await safe(db.from('notifications').insert(
-            uniqueClients.map(cid => ({
-              user_id: cid,
-              title:   'Reservation annulee',
-              body:    'Un partenaire a quitte la plateforme. Votre reservation a ete annulee. Contactez le support ZUKAGO.',
+          const uniqueClientIds = [...new Set(activeBookings.map(b => b.user_id))];
+          log.push(`Clients to notify: ${uniqueClientIds.length}`);
+
+          await db.from('notifications').insert(
+            uniqueClientIds.map(clientId => ({
+              user_id: clientId,
+              title:   'Réservation annulée',
+              body:    `Le partenaire a quitté la plateforme. Votre réservation pour "${user.name}" a été annulée. Contactez le support ZUKAGO pour un remboursement ou une alternative.`,
               type:    'info',
             }))
-          ), 'client-notifs');
+          ).catch(e => log.push(`Client notif error: ${e.message}`));
         }
 
-        // Cascade manuelle
-        await safe(db.from('reviews').delete().in('listing_id', listingIds),          'reviews');
-        await safe(db.from('favorites').delete().in('listing_id', listingIds),        'favorites');
-        await safe(db.from('listing_photos').delete().in('listing_id', listingIds),   'photos');
-        await safe(db.from('listing_amenities').delete().in('listing_id', listingIds),'amenities');
-        await safe(db.from('bookings').delete().in('listing_id', listingIds),         'bookings');
-        await safe(db.from('listings').delete().in('id', listingIds),                 'listings');
+        // 1c. Supprimer photos Cloudinary
+        const { data: photos } = await db.from('listing_photos')
+          .select('public_id').in('listing_id', listingIds);
+        if (photos?.length) {
+          log.push(`Cloudinary photos: ${photos.length}`);
+          await Promise.allSettled(
+            photos
+              .filter(p => p.public_id)
+              .map(p => deleteImage(p.public_id).catch(() => null))
+          );
+        }
+
+        // 1d. Cascade DB : supprimer tout ce qui référence ces listings
+        await db.from('reviews').delete().in('listing_id', listingIds).catch(() => {});
+        await db.from('favorites').delete().in('listing_id', listingIds).catch(() => {});
+        await db.from('listing_photos').delete().in('listing_id', listingIds).catch(() => {});
+        await db.from('listing_amenities').delete().in('listing_id', listingIds).catch(() => {});
+        await db.from('bookings').delete().in('listing_id', listingIds).catch(() => {});
+
+        // 1e. Supprimer les annonces
+        await db.from('listings').delete().in('id', listingIds);
+        log.push(`Listings deleted`);
       }
 
-      await safe(db.from('withdrawals').delete().eq('partner_id', partner.id), 'withdrawals');
-      await safe(db.from('partners').delete().eq('id', partner.id),            'partner');
-      log.push('partner-deleted');
+      // 1f. Supprimer retraits du partenaire
+      await db.from('withdrawals').delete().eq('partner_id', partner.id).catch(() => {});
+
+      // 1g. Supprimer le profil partenaire
+      await db.from('partners').delete().eq('id', partner.id);
+      log.push(`Partner profile deleted`);
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // 2. Nettoyage tables avec user_id
-    // ⚠️ commissions n'a PAS de user_id (juste booking_id + partner_id)
-    // ⚠️ donc PAS de db.from('commissions').delete().eq('user_id', id)
-    // ─────────────────────────────────────────────────────────────
-    await safe(db.from('bookings').delete().eq('user_id', id),      'user-bookings');
-    await safe(db.from('reviews').delete().eq('user_id', id),       'user-reviews');
-    await safe(db.from('favorites').delete().eq('user_id', id),     'user-favorites');
-    await safe(db.from('push_tokens').delete().eq('user_id', id),   'user-tokens');
-    await safe(db.from('notifications').delete().eq('user_id', id), 'user-notifs');
-    await safe(db.from('payments').delete().eq('user_id', id),      'user-payments');
-    log.push('user-tables-cleaned');
+    // ─────────────────────────────────────────────────────────────────
+    // 2. Données du USER (en tant que client OU autre)
+    // ─────────────────────────────────────────────────────────────────
+    await db.from('bookings').delete().eq('user_id', id).catch(() => {});
+    await db.from('reviews').delete().eq('user_id', id).catch(() => {});
+    await db.from('favorites').delete().eq('user_id', id).catch(() => {});
+    await db.from('push_tokens').delete().eq('user_id', id).catch(() => {});
+    await db.from('notifications').delete().eq('user_id', id).catch(() => {});
+    await db.from('payments').delete().eq('user_id', id).catch(() => {});
+    await db.from('commissions').delete().eq('user_id', id).catch(() => {});
+    log.push(`User-related tables cleaned`);
 
-    // ─────────────────────────────────────────────────────────────
-    // 3. Supprimer l'user
-    // ─────────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────
+    // 3. Supprimer l'utilisateur lui-même
+    // ─────────────────────────────────────────────────────────────────
     const { error: delErr } = await db.from('users').delete().eq('id', id);
     if (delErr) {
-      console.error('[Admin] users.delete error:', delErr, log);
+      console.error('[Admin Delete] users.delete error:', delErr);
       return res.status(500).json({
         error: `Impossible de supprimer l'utilisateur : ${delErr.message}`,
         log,
       });
     }
 
-    // ─────────────────────────────────────────────────────────────
-    // 4. VÉRIFICATION POST-DELETE
-    // ─────────────────────────────────────────────────────────────
-    const { data: stillExists } = await db.from('users').select('id').eq('id', id).maybeSingle();
+    // ─────────────────────────────────────────────────────────────────
+    // 4. Vérifier que le user a bien disparu
+    // ─────────────────────────────────────────────────────────────────
+    const { data: stillExists } = await db.from('users').select('id').eq('id', id).single();
     if (stillExists) {
-      console.error('[Admin] ❌ User still exists after delete!', id, log);
+      console.error('[Admin Delete] User still exists after delete!', id);
       return res.status(500).json({
-        error: 'La suppression a echoue (utilisateur toujours present). Verifiez les FK CASCADE.',
+        error: 'La suppression a échoué (utilisateur toujours présent). Vérifiez les contraintes FK.',
         log,
       });
     }
 
     console.log(`[Admin] ✅ User deleted: ${user.name} (${user.email})`, log);
-    return res.json({
-      message: `Compte de ${user.name} supprime avec toutes ses donnees.`,
+    res.json({
+      message: `Compte de ${user.name} supprimé avec toutes ses données.`,
       deleted: true,
     });
 
   } catch (e) {
-    console.error('[Admin] Delete exception:', e.message, log);
+    console.error('[Admin Delete] Error:', e.message, log);
     return res.status(500).json({
       error: 'Erreur suppression: ' + e.message,
       log,
@@ -728,209 +621,154 @@ router.delete('/users/:id', asyncHandler(async (req, res) => {
   }
 }));
 
-// ═══════════════════════════════════════════════════════════════════════════
-// DELETE LISTINGS/PARTNERS — routes admin avec cascade + notifs
-// ═══════════════════════════════════════════════════════════════════════════
-
-// DELETE /api/admin/listings/:id — Force suppression annonce + cascade + notifs
-router.delete('/listings/:id', asyncHandler(async (req, res) => {
-  const { deleteImage } = require('../config/cloudinary');
-  const listingId = req.params.id;
-  console.log(`[Admin] DELETE /listings/${listingId} by ${req.user?.email}`);
-
-  const { data: listing } = await db.from('listings')
-    .select('id, title, partner_id').eq('id', listingId).maybeSingle();
-  if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
-
-  // Bookings actifs → notifier clients
-  const { data: activeBookings } = await db.from('bookings')
-    .select('id, user_id, status').eq('listing_id', listingId)
-    .in('status', ['pending', 'confirmed']);
-
-  if (activeBookings?.length) {
-    const uniqueClients = [...new Set(activeBookings.map(b => b.user_id))];
-    await safe(db.from('notifications').insert(
-      uniqueClients.map(cid => ({
-        user_id: cid,
-        title:   'Reservation annulee',
-        body:    `Votre reservation pour "${listing.title}" a ete annulee par l'administration ZUKAGO.`,
-        type:    'info',
-      }))
-    ), 'listing-delete-clients');
-  }
-
-  // Notifier le partenaire
-  if (listing.partner_id) {
-    const { data: partnerRow } = await db.from('partners')
-      .select('user_id').eq('id', listing.partner_id).maybeSingle();
-    if (partnerRow?.user_id) {
-      await safe(db.from('notifications').insert({
-        user_id: partnerRow.user_id,
-        title:   'Annonce supprimee par ZUKAGO',
-        body:    `Votre annonce "${listing.title}" a ete supprimee. ${activeBookings?.length || 0} reservation(s) annulee(s).`,
-        type:    'info',
-      }), 'listing-delete-partner');
-    }
-  }
-
-  // Photos Cloudinary
-  const { data: photos } = await db.from('listing_photos')
-    .select('public_id').eq('listing_id', listingId);
-  if (photos?.length) {
-    await Promise.allSettled(
-      photos.filter(p => p.public_id).map(p => deleteImage(p.public_id).catch(() => null))
-    );
-  }
-
-  // Cascade manuelle
-  await safe(db.from('listing_photos').delete().eq('listing_id', listingId),    'ph');
-  await safe(db.from('listing_amenities').delete().eq('listing_id', listingId), 'am');
-  await safe(db.from('reviews').delete().eq('listing_id', listingId),           'rv');
-  await safe(db.from('favorites').delete().eq('listing_id', listingId),         'fa');
-  await safe(db.from('bookings').delete().eq('listing_id', listingId),          'bk');
-
-  // Delete
-  const { error } = await db.from('listings').delete().eq('id', listingId);
-  if (error) return res.status(500).json({ error: `Erreur suppression : ${error.message}` });
-
-  // Vérif post-delete
-  const { data: stillExists } = await db.from('listings').select('id').eq('id', listingId).maybeSingle();
-  if (stillExists) return res.status(500).json({ error: 'La suppression a echoue (ligne toujours presente).' });
-
-  console.log(`[Admin] ✅ Listing deleted: ${listing.title}`);
-  res.json({
-    message: 'Annonce supprimee definitivement',
-    deleted: true,
-    bookings_cancelled: activeBookings?.length || 0,
-  });
-}));
-
-// GET /api/admin/partners/:id/impact — Impact d'une suppression partenaire
-router.get('/partners/:id/impact', asyncHandler(async (req, res) => {
-  const partnerId = req.params.id;
-
-  const { data: partner } = await db.from('partners')
-    .select('id, user_id').eq('id', partnerId).maybeSingle();
-  if (!partner) return res.status(404).json({ error: 'Partenaire introuvable' });
-
-  const { data: user } = await db.from('users')
-    .select('id, name').eq('id', partner.user_id).maybeSingle();
-
-  const { data: listings } = await db.from('listings')
-    .select('id').eq('partner_id', partnerId);
-  const listingIds = (listings || []).map(l => l.id);
-
-  let activeBookings = 0, pendingBookings = 0, confirmedBookings = 0, clientsAffected = 0;
-  if (listingIds.length) {
-    const { data: bookings } = await db.from('bookings')
-      .select('user_id, status').in('listing_id', listingIds)
-      .in('status', ['pending', 'confirmed']);
-    if (bookings?.length) {
-      activeBookings    = bookings.length;
-      pendingBookings   = bookings.filter(b => b.status === 'pending').length;
-      confirmedBookings = bookings.filter(b => b.status === 'confirmed').length;
-      clientsAffected   = new Set(bookings.map(b => b.user_id)).size;
-    }
-  }
-
-  res.json({
-    partner_name:       user?.name || '',
-    listings_count:     listingIds.length,
-    active_bookings:    activeBookings,
-    pending_bookings:   pendingBookings,
-    confirmed_bookings: confirmedBookings,
-    clients_affected:   clientsAffected,
-  });
-}));
-
-// DELETE /api/admin/partners/:id — Force suppression partenaire + cascade totale
-router.delete('/partners/:id', asyncHandler(async (req, res) => {
-  const { deleteImage } = require('../config/cloudinary');
-  const partnerId = req.params.id;
-  console.log(`[Admin] DELETE /partners/${partnerId} by ${req.user?.email}`);
-
-  const { data: partner } = await db.from('partners')
-    .select('id, user_id').eq('id', partnerId).maybeSingle();
-  if (!partner) return res.status(404).json({ error: 'Partenaire introuvable' });
-
-  const { data: user } = await db.from('users')
-    .select('id, name').eq('id', partner.user_id).maybeSingle();
-
-  // Annonces
-  const { data: listings } = await db.from('listings')
-    .select('id, title').eq('partner_id', partnerId);
-  const listingIds = (listings || []).map(l => l.id);
-
-  if (listingIds.length) {
-    // Notifier clients bookings actifs
-    const { data: activeBookings } = await db.from('bookings')
-      .select('user_id').in('listing_id', listingIds)
-      .in('status', ['pending', 'confirmed']);
-    if (activeBookings?.length) {
-      const uniqueClients = [...new Set(activeBookings.map(b => b.user_id))];
-      await safe(db.from('notifications').insert(
-        uniqueClients.map(cid => ({
-          user_id: cid,
-          title:   'Reservation annulee',
-          body:    `Le partenaire ${user?.name || ''} a ete retire de la plateforme. Votre reservation a ete annulee. Contactez le support pour un remboursement ou une alternative.`,
-          type:    'info',
-        }))
-      ), 'partner-delete-clients');
-    }
-
-    // Photos Cloudinary
-    const { data: photos } = await db.from('listing_photos')
-      .select('public_id').in('listing_id', listingIds);
-    if (photos?.length) {
-      await Promise.allSettled(
-        photos.filter(p => p.public_id).map(p => deleteImage(p.public_id).catch(() => null))
-      );
-    }
-
-    // Cascade manuelle
-    await safe(db.from('listing_photos').delete().in('listing_id', listingIds),    'ph');
-    await safe(db.from('listing_amenities').delete().in('listing_id', listingIds), 'am');
-    await safe(db.from('reviews').delete().in('listing_id', listingIds),           'rv');
-    await safe(db.from('favorites').delete().in('listing_id', listingIds),         'fa');
-    await safe(db.from('bookings').delete().in('listing_id', listingIds),          'bk');
-    await safe(db.from('listings').delete().in('id', listingIds),                  'ls');
-  }
-
-  // Notifier le partenaire lui-même
-  await safe(db.from('notifications').insert({
-    user_id: partner.user_id,
-    title:   'Compte partenaire supprime',
-    body:    `Votre compte partenaire a ete supprime par l'administration ZUKAGO. Vous pouvez soumettre une nouvelle demande si besoin.`,
-    type:    'info',
-  }), 'partner-self-notif');
-
-  // Retraits
-  await safe(db.from('withdrawals').delete().eq('partner_id', partnerId), 'withdrawals');
-
-  // Delete partner
-  const { error } = await db.from('partners').delete().eq('id', partnerId);
-  if (error) return res.status(500).json({ error: `Erreur suppression : ${error.message}` });
-
-  // Vérif post-delete
-  const { data: stillExists } = await db.from('partners').select('id').eq('id', partnerId).maybeSingle();
-  if (stillExists) return res.status(500).json({ error: 'La suppression a echoue.' });
-
-  // Remettre user en 'client'
-  await safe(db.from('users').update({ role: 'client' }).eq('id', partner.user_id), 'role-client');
-
-  console.log(`[Admin] ✅ Partner ${partnerId} deleted (${listingIds.length} listings)`);
-  res.json({
-    message:          `Partenaire ${user?.name || ''} supprime.`,
-    deleted:          true,
-    listings_deleted: listingIds.length,
-  });
-}));
-
 
 // GET /api/admin/test-email — Tester Mailgun
 router.get('/test-email', asyncHandler(async (req, res) => {
   const result = await emailService.testConnection();
   res.json({ result });
+}));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ✅ V9 : CLIENT PROMOTIONS — Clients en attente de devenir partenaire
+// ═══════════════════════════════════════════════════════════════════════════
+
+// GET /api/admin/client-promotions — Liste clients ayant soumis une demande
+router.get('/client-promotions', asyncHandler(async (req, res) => {
+  const { data, error } = await db.from('users')
+    .select('id, name, email, phone, whatsapp, role, demande_verified, verified, avatar, created_at')
+    .eq('role', 'client')
+    .eq('demande_verified', true)
+    .eq('verified', false)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('[admin] client-promotions error:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+
+  // Optionnel : joindre les infos de la table partners pour voir les détails de la demande
+  const userIds = (data || []).map(u => u.id);
+  let partnersMap = {};
+  if (userIds.length > 0) {
+    const { data: partnersData } = await db.from('partners')
+      .select('user_id, company_name, whatsapp, country, city, service_category, commission_rate, created_at')
+      .in('user_id', userIds);
+    (partnersData || []).forEach(p => { partnersMap[p.user_id] = p; });
+  }
+
+  const enriched = (data || []).map(u => ({
+    ...u,
+    partner_info: partnersMap[u.id] || null,
+  }));
+
+  res.json({ users: enriched, count: enriched.length });
+}));
+
+// GET /api/admin/client-promotions/:userId — Détail d'un client à promouvoir
+router.get('/client-promotions/:userId', asyncHandler(async (req, res) => {
+  const { data: user, error: userErr } = await db.from('users')
+    .select('id, name, email, phone, whatsapp, role, demande_verified, verified, avatar, created_at')
+    .eq('id', req.params.userId)
+    .maybeSingle();
+
+  if (userErr || !user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+
+  // Récupérer détails de la demande partenaire
+  const { data: partner } = await db.from('partners')
+    .select('*')
+    .eq('user_id', user.id)
+    .maybeSingle();
+
+  res.json({ user, partner });
+}));
+
+// PATCH /api/admin/client-promotions/:userId/approve — Approuver (3 changements)
+router.patch('/client-promotions/:userId/approve', asyncHandler(async (req, res) => {
+  const userId = req.params.userId;
+
+  // Vérifier que c'est bien un client en attente
+  const { data: existingUser, error: checkErr } = await db.from('users')
+    .select('id, role, demande_verified, verified')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (checkErr || !existingUser) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  if (existingUser.role !== 'client') return res.status(400).json({ error: 'Cet utilisateur n\'est pas un client' });
+
+  // ✅ 3 CHANGEMENTS SIMULTANÉS pour un client → partenaire
+  const { data, error } = await db.from('users')
+    .update({
+      role:              'partner',
+      demande_verified:  true,
+      verified:          true,
+      updated_at:        new Date().toISOString(),
+    })
+    .eq('id', userId)
+    .select()
+    .maybeSingle();
+
+  if (error) {
+    console.error('[admin] approve client error:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+
+  // Aussi mettre à jour partners.status si une ligne existe
+  try {
+    await db.from('partners')
+      .update({ status: 'approved' })
+      .eq('user_id', userId);
+  } catch (e) { /* ignore */ }
+
+  // Notification au user
+  try {
+    await db.from('notifications').insert({
+      user_id: userId,
+      title:   'Félicitations ! Vous êtes maintenant partenaire ZUKAGO 🎉',
+      body:    'Votre demande a été approuvée. Vous pouvez maintenant publier vos annonces.',
+      type:    'success',
+    });
+  } catch (e) { /* ignore */ }
+
+  console.log(`[admin] ✅ Client ${userId} promu partenaire`);
+  res.json({ user: data, message: 'Client approuvé avec succès' });
+}));
+
+// PATCH /api/admin/client-promotions/:userId/reject — Refuser (reset demande_verified)
+router.patch('/client-promotions/:userId/reject', asyncHandler(async (req, res) => {
+  const userId = req.params.userId;
+  const { message } = req.body || {};
+
+  const { data, error } = await db.from('users')
+    .update({
+      demande_verified: false,
+      updated_at:       new Date().toISOString(),
+    })
+    .eq('id', userId)
+    .eq('role', 'client')
+    .select()
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: error.message });
+
+  // Mettre la demande partners à rejected
+  try {
+    await db.from('partners')
+      .update({ status: 'rejected', rejection_msg: message || null })
+      .eq('user_id', userId);
+  } catch (e) { /* ignore */ }
+
+  // Notif
+  try {
+    await db.from('notifications').insert({
+      user_id: userId,
+      title:   'Demande partenaire non retenue',
+      body:    message || 'Votre demande n\'a pas pu être validée. Vous pouvez la re-soumettre.',
+      type:    'info',
+    });
+  } catch (e) { /* ignore */ }
+
+  console.log(`[admin] ❌ Client ${userId} refusé`);
+  res.json({ user: data, message: 'Demande refusée' });
 }));
 
 module.exports = router;
