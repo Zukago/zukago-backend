@@ -9,12 +9,22 @@ cloudinary.config({
 });
 
 // Storage pour listings
+// ✅ V10 : crop:'limit' (pas de rognage) + quality:'auto:good' + fetch_format:'auto' (WebP auto)
+// - limit  : redimensionne SEULEMENT si l'image dépasse 1600x1200, sinon garde original. Jamais de rognage.
+// - quality:'auto:good' : compression intelligente (~75-85% selon contenu), perte visuelle nulle
+// - fetch_format:'auto' : Cloudinary sert WebP/AVIF au navigateur compatible = 30% plus léger
 const listingStorage = new CloudinaryStorage({
   cloudinary,
   params: {
     folder: 'zukago/listings',
     allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
-    transformation: [{ width: 1200, height: 800, crop: 'fill', quality: 85 }],
+    transformation: [{
+      width:        1600,
+      height:       1200,
+      crop:         'limit',          // ← ne rogne JAMAIS
+      quality:      'auto:good',      // ← compression auto intelligente
+      fetch_format: 'auto',           // ← WebP/AVIF auto selon device
+    }],
   },
 });
 
