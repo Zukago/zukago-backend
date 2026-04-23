@@ -17,14 +17,12 @@ router.get('/me', authenticate, asyncHandler(async (req, res) => {
 
 // ─── GET /api/partners/stats — Stats du partenaire ───────────────────────────
 router.get('/stats', authenticate, asyncHandler(async (req, res) => {
-  let { data: partner } = await db.from('partners').select('id, solde').eq('user_id', req.user.id).single();
-  if (!partner) {
-    const { data: np } = await db.from('partners')
-      .insert({ user_id: req.user.id, type: 'proprietaire', status: 'approved' })
-      .select().single();
-    partner = np;
-  }
-  if (!partner) return res.json({});
+  const { data: partner } = await db.from('partners').select('id, solde').eq('user_id', req.user.id).maybeSingle();
+  // ✅ V10 : Plus d'auto-create. Si pas de profil partner → retourner stats vides.
+  if (!partner) return res.json({
+    totalListings: 0, activeListings: 0, totalBookings: 0, confirmedBookings: 0,
+    revenuMois: 0, totalRevenu: 0, solde: 0,
+  });
 
   const now = new Date();
   const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
@@ -66,13 +64,8 @@ router.get('/stats', authenticate, asyncHandler(async (req, res) => {
 
 // ─── GET /api/partners/listings — Mes annonces ───────────────────────────────
 router.get('/listings', authenticate, asyncHandler(async (req, res) => {
-  let { data: partner } = await db.from('partners').select('id').eq('user_id', req.user.id).single();
-  if (!partner) {
-    const { data: np } = await db.from('partners')
-      .insert({ user_id: req.user.id, type: 'proprietaire', status: 'approved' })
-      .select().single();
-    partner = np;
-  }
+  const { data: partner } = await db.from('partners').select('id').eq('user_id', req.user.id).maybeSingle();
+  // ✅ V10 : Plus d'auto-create. Si pas de profil partner → pas d'annonces.
   if (!partner) return res.json({ listings: [] });
 
   const { data: listings } = await db.from('listings')
@@ -85,14 +78,8 @@ router.get('/listings', authenticate, asyncHandler(async (req, res) => {
 
 // ─── GET /api/partners/bookings — Mes réservations ───────────────────────────
 router.get('/bookings', authenticate, asyncHandler(async (req, res) => {
-  // Auto-créer partenaire si besoin (ne pas bloquer avec requirePartner)
-  let { data: partner } = await db.from('partners').select('id').eq('user_id', req.user.id).single();
-  if (!partner) {
-    const { data: np } = await db.from('partners')
-      .insert({ user_id: req.user.id, type: 'proprietaire', status: 'approved' })
-      .select().single();
-    partner = np;
-  }
+  const { data: partner } = await db.from('partners').select('id').eq('user_id', req.user.id).maybeSingle();
+  // ✅ V10 : Plus d'auto-create. Si pas de profil partner → pas de réservations.
   if (!partner) return res.json({ bookings: [] });
 
   // Récupérer tous les listing_ids de ce partenaire (tous statuts, pas seulement active)
@@ -214,19 +201,18 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
     });
   }
 
-  // ═══ UPDATE user : demande_verified=true + role=partner si client ═══
-  const updates = { demande_verified: true };
-  if (userRow.role !== 'partner' && userRow.role !== 'admin') {
-    updates.role = 'partner';
-  }
-
+  // ═══ UPDATE user : demande_verified=true seulement ═══
+  // ✅ V10 : Le role NE CHANGE PAS à la soumission.
+  // - Client reste 'client' → apparaît dans admin → "Clients → Partenaires"
+  // - Partner reste 'partner' → apparaît dans admin → "Partenaires en attente"
+  // Le role passe à 'partner' UNIQUEMENT quand l'admin valide (cf admin.js client-promotions/approve)
   const { error: updErr } = await db.from('users')
-    .update(updates).eq('id', req.user.id);
+    .update({ demande_verified: true }).eq('id', req.user.id);
   if (updErr) {
     console.error(`[Partners] UPDATE user error: ${updErr.message}`);
     return res.status(500).json({ error: 'Erreur MAJ user : ' + updErr.message });
   }
-  console.log(`[Partners] ✅ User updated : role=${updates.role || userRow.role}, demande_verified=true`);
+  console.log(`[Partners] ✅ User ${req.user.email} : demande_verified=true (role inchangé: ${userRow.role})`);
 
   // Notification aux admins
   const { data: admins } = await db.from('users')
