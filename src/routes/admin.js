@@ -11,86 +11,126 @@ router.use(authenticate, requireAdmin);
 
 // ─── PARTENAIRES ─────────────────────────────────────────────────────────────
 
-// GET /api/admin/partners — Liste des partenaires en attente
+// GET /api/admin/partners — Partenaires en attente de validation
+// ✅ V10 : Filtre cohérent avec client-promotions
+//   role='partner' + demande_verified=true + verified=false
+// Retourne : liste d'users avec leur partner_info (CNI, whatsapp, etc.)
 router.get('/partners', asyncHandler(async (req, res) => {
-  const status = req.query.status || 'pending';
-  const { data } = await db.from('partners')
-    .select('*, users(name, email, phone, avatar, whatsapp)')
-    .eq('status', status)
+  const { data: users, error } = await db.from('users')
+    .select('id, name, email, phone, whatsapp, avatar, role, demande_verified, verified, created_at')
+    .eq('role', 'partner')
+    .eq('demande_verified', true)
+    .eq('verified', false)
     .order('created_at', { ascending: false });
-  res.json({ partners: data || [] });
+
+  if (error) {
+    console.error('[admin] GET /partners error:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+
+  // Joindre les détails de la table partners (CNI, whatsapp, address, bio, type...)
+  const userIds = (users || []).map(u => u.id);
+  let partnersMap = {};
+  if (userIds.length > 0) {
+    const { data: partnersData } = await db.from('partners')
+      .select('id, user_id, type, cni_number, whatsapp, address, bio, status, created_at')
+      .in('user_id', userIds);
+    (partnersData || []).forEach(p => { partnersMap[p.user_id] = p; });
+  }
+
+  // Format compatible avec l'UI : { id (user.id), name, email, ..., partner_info, type }
+  const partners = (users || []).map(u => ({
+    ...u,
+    partner_info: partnersMap[u.id] || null,
+    type: partnersMap[u.id]?.type || 'proprietaire',
+  }));
+
+  res.json({ partners });
 }));
 
 // PATCH /api/admin/partners/:id/approve — Approuver partenaire
+// ✅ V10 : :id = user.id (cohérent avec la nouvelle logique GET /partners et client-promotions)
 router.patch('/partners/:id/approve', asyncHandler(async (req, res) => {
-  const { data: partner } = await db.from('partners')
-    .select('*, users(name, email)').eq('id', req.params.id).single();
-  if (!partner) return res.status(404).json({ error: 'Partenaire introuvable' });
+  const userId = req.params.id;
 
-  await db.from('partners').update({
-    status: 'approved',
-    approved_by: req.user.id,
-    approved_at: new Date(),
-  }).eq('id', req.params.id);
+  const { data: user } = await db.from('users')
+    .select('id, name, email, role').eq('id', userId).maybeSingle();
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
 
-  // ✅ V10 : 3 changements cohérents avec client-promotions/approve
+  // Mettre à jour la ligne partners si elle existe (détails de la demande)
+  try {
+    await db.from('partners').update({
+      status:      'approved',
+      approved_by: req.user.id,
+      approved_at: new Date(),
+    }).eq('user_id', userId);
+  } catch (e) { console.log('Partner row update error:', e.message); }
+
+  // ✅ V10 : 3 changements sur users (cohérent avec client-promotions/approve)
   // role=partner + demande_verified=true + verified=true
-  // → Le user peut maintenant publier (conditions handlePublishClick respectées)
   await db.from('users').update({
     role:             'partner',
     demande_verified: true,
     verified:         true,
     updated_at:       new Date().toISOString(),
-  }).eq('id', partner.user_id);
+  }).eq('id', userId);
 
   // Notification in-app
   try {
     await db.from('notifications').insert({
-      user_id: partner.user_id,
+      user_id: userId,
       title: '🎉 Compte partenaire approuvé !',
-      body: `Bienvenue ${partner.users.name} ! Vous pouvez maintenant publier vos annonces sur ZUKAGO.`,
+      body: `Bienvenue ${user.name} ! Vous pouvez maintenant publier vos annonces sur ZUKAGO.`,
       type: 'info',
     });
   } catch(e) { console.log('Notif partner approve error:', e.message); }
 
   // Email de confirmation
-  try { await emailService.sendPartnerApproved(partner.users); } catch(e) {}
+  try { await emailService.sendPartnerApproved(user); } catch(e) {}
 
   // Mettre à jour stats_daily
   statsService.updateDay();
 
-  res.json({ message: `Partenaire ${partner.users.name} approuvé` });
+  res.json({ message: `Partenaire ${user.name} approuvé` });
 }));
 
 // PATCH /api/admin/partners/:id/reject — Rejeter partenaire
+// ✅ V10 : :id = user.id (cohérent avec approve)
 router.patch('/partners/:id/reject', asyncHandler(async (req, res) => {
+  const userId = req.params.id;
   const { message } = req.body;
-  const { data: partner } = await db.from('partners')
-    .select('*, users(name, email)').eq('id', req.params.id).single();
-  if (!partner) return res.status(404).json({ error: 'Partenaire introuvable' });
 
-  await db.from('partners').update({ status: 'rejected', rejection_msg: message }).eq('id', req.params.id);
+  const { data: user } = await db.from('users')
+    .select('id, name, email').eq('id', userId).maybeSingle();
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
 
-  // ✅ V10 : Reset demande_verified sur user (cohérence avec handlePublishClick)
-  // → User peut re-soumettre une demande corrigée
+  // Mettre à jour la ligne partners si elle existe
+  try {
+    await db.from('partners').update({
+      status:        'rejected',
+      rejection_msg: message,
+    }).eq('user_id', userId);
+  } catch (e) { console.log('Partner row update error:', e.message); }
+
+  // Reset demande_verified sur user (pour qu'il puisse re-soumettre)
   try {
     await db.from('users').update({
       demande_verified: false,
       updated_at:       new Date().toISOString(),
-    }).eq('id', partner.user_id);
+    }).eq('id', userId);
   } catch (e) { console.log('User reset on reject error:', e.message); }
 
   // Notification in-app
   try {
     await db.from('notifications').insert({
-      user_id: partner.user_id,
+      user_id: userId,
       title: 'Demande partenaire refusée',
       body: `Votre demande partenaire n'a pas ete approuvee. ${message ? 'Raison : ' + message : 'Contactez le support.'}`,
       type: 'info',
     });
   } catch(e) { console.log('Notif partner reject error:', e.message); }
 
-  try { await emailService.sendPartnerRejected(partner.users, message); } catch(e) {}
+  try { await emailService.sendPartnerRejected(user, message); } catch(e) {}
 
   res.json({ message: 'Partenaire rejeté' });
 }));
