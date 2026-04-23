@@ -33,7 +33,15 @@ router.patch('/partners/:id/approve', asyncHandler(async (req, res) => {
     approved_at: new Date(),
   }).eq('id', req.params.id);
 
-  await db.from('users').update({ role: 'partner' }).eq('id', partner.user_id);
+  // ✅ V10 : 3 changements cohérents avec client-promotions/approve
+  // role=partner + demande_verified=true + verified=true
+  // → Le user peut maintenant publier (conditions handlePublishClick respectées)
+  await db.from('users').update({
+    role:             'partner',
+    demande_verified: true,
+    verified:         true,
+    updated_at:       new Date().toISOString(),
+  }).eq('id', partner.user_id);
 
   // Notification in-app
   try {
@@ -62,6 +70,15 @@ router.patch('/partners/:id/reject', asyncHandler(async (req, res) => {
   if (!partner) return res.status(404).json({ error: 'Partenaire introuvable' });
 
   await db.from('partners').update({ status: 'rejected', rejection_msg: message }).eq('id', req.params.id);
+
+  // ✅ V10 : Reset demande_verified sur user (cohérence avec handlePublishClick)
+  // → User peut re-soumettre une demande corrigée
+  try {
+    await db.from('users').update({
+      demande_verified: false,
+      updated_at:       new Date().toISOString(),
+    }).eq('id', partner.user_id);
+  } catch (e) { console.log('User reset on reject error:', e.message); }
 
   // Notification in-app
   try {
@@ -478,12 +495,14 @@ router.patch('/users/:id/suspend', asyncHandler(async (req, res) => {
   await db.from('users').update({ active }).eq('id', req.params.id);
 
   // Notif in-app
-  await db.from('notifications').insert({
-    user_id: req.params.id,
-    title: active ? 'Compte réactivé' : 'Compte suspendu',
-    body:  active ? 'Votre compte ZUKAGO a été réactivé.' : 'Votre compte a été suspendu. Contactez le support.',
-    type:  'info',
-  }).catch(() => {});
+  try {
+    await db.from('notifications').insert({
+      user_id: req.params.id,
+      title: active ? 'Compte réactivé' : 'Compte suspendu',
+      body:  active ? 'Votre compte ZUKAGO a été réactivé.' : 'Votre compte a été suspendu. Contactez le support.',
+      type:  'info',
+    });
+  } catch (e) { /* notif non bloquante */ }
 
   res.json({ message: `Compte ${user.name} ${active ? 'réactivé' : 'suspendu'}` });
 }));
@@ -551,11 +570,14 @@ router.delete('/users/:id', asyncHandler(async (req, res) => {
         }
 
         // 1d. Cascade DB : supprimer tout ce qui référence ces listings
-        await db.from('reviews').delete().in('listing_id', listingIds).catch(() => {});
-        await db.from('favorites').delete().in('listing_id', listingIds).catch(() => {});
-        await db.from('listing_photos').delete().in('listing_id', listingIds).catch(() => {});
-        await db.from('listing_amenities').delete().in('listing_id', listingIds).catch(() => {});
-        await db.from('bookings').delete().in('listing_id', listingIds).catch(() => {});
+        const cascadeListings = async () => {
+          try { await db.from('reviews').delete().in('listing_id', listingIds); } catch (e) { log.push(`reviews cascade: ${e.message}`); }
+          try { await db.from('favorites').delete().in('listing_id', listingIds); } catch (e) { log.push(`favorites cascade: ${e.message}`); }
+          try { await db.from('listing_photos').delete().in('listing_id', listingIds); } catch (e) { log.push(`listing_photos cascade: ${e.message}`); }
+          try { await db.from('listing_amenities').delete().in('listing_id', listingIds); } catch (e) { log.push(`listing_amenities cascade: ${e.message}`); }
+          try { await db.from('bookings').delete().in('listing_id', listingIds); } catch (e) { log.push(`bookings cascade: ${e.message}`); }
+        };
+        await cascadeListings();
 
         // 1e. Supprimer les annonces
         await db.from('listings').delete().in('id', listingIds);
@@ -563,7 +585,7 @@ router.delete('/users/:id', asyncHandler(async (req, res) => {
       }
 
       // 1f. Supprimer retraits du partenaire
-      await db.from('withdrawals').delete().eq('partner_id', partner.id).catch(() => {});
+      try { await db.from('withdrawals').delete().eq('partner_id', partner.id); } catch (e) { log.push(`withdrawals: ${e.message}`); }
 
       // 1g. Supprimer le profil partenaire
       await db.from('partners').delete().eq('id', partner.id);
@@ -573,13 +595,20 @@ router.delete('/users/:id', asyncHandler(async (req, res) => {
     // ─────────────────────────────────────────────────────────────────
     // 2. Données du USER (en tant que client OU autre)
     // ─────────────────────────────────────────────────────────────────
-    await db.from('bookings').delete().eq('user_id', id).catch(() => {});
-    await db.from('reviews').delete().eq('user_id', id).catch(() => {});
-    await db.from('favorites').delete().eq('user_id', id).catch(() => {});
-    await db.from('push_tokens').delete().eq('user_id', id).catch(() => {});
-    await db.from('notifications').delete().eq('user_id', id).catch(() => {});
-    await db.from('payments').delete().eq('user_id', id).catch(() => {});
-    await db.from('commissions').delete().eq('user_id', id).catch(() => {});
+    const safeDelete = async (table, field = 'user_id') => {
+      try {
+        await db.from(table).delete().eq(field, id);
+      } catch (e) {
+        log.push(`${table} cleanup: ${e.message}`);
+      }
+    };
+    await safeDelete('bookings');
+    await safeDelete('reviews');
+    await safeDelete('favorites');
+    await safeDelete('push_tokens');
+    await safeDelete('notifications');
+    await safeDelete('payments');
+    await safeDelete('commissions');
     log.push(`User-related tables cleaned`);
 
     // ─────────────────────────────────────────────────────────────────
