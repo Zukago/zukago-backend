@@ -137,8 +137,150 @@ router.patch('/partners/:id/reject', asyncHandler(async (req, res) => {
 
 // PATCH /api/admin/partners/:id/suspend — Suspendre
 router.patch('/partners/:id/suspend', asyncHandler(async (req, res) => {
-  await db.from('partners').update({ status: 'suspended' }).eq('id', req.params.id);
+  await db.from('partners').update({ status: 'suspended' }).eq('user_id', req.params.id);
   res.json({ message: 'Partenaire suspendu' });
+}));
+
+// GET /api/admin/partners/:id/impact — Impact de la suppression d'un partenaire
+// ✅ V10 : :id = user.id (cohérent avec approve/reject)
+router.get('/partners/:id/impact', asyncHandler(async (req, res) => {
+  const userId = req.params.id;
+
+  // Récupérer le profil partner
+  const { data: partnerRow } = await db.from('partners')
+    .select('id').eq('user_id', userId).maybeSingle();
+
+  if (!partnerRow) {
+    return res.json({ listings_count: 0, active_bookings: 0, confirmed_bookings: 0, clients_affected: 0 });
+  }
+
+  // Annonces du partenaire
+  const { data: listings } = await db.from('listings')
+    .select('id').eq('partner_id', partnerRow.id);
+  const listingIds = (listings || []).map(l => l.id);
+
+  let activeBookings = 0;
+  let confirmedBookings = 0;
+  let clientsAffected = 0;
+
+  if (listingIds.length > 0) {
+    const { data: bookings } = await db.from('bookings')
+      .select('user_id, status')
+      .in('listing_id', listingIds)
+      .in('status', ['pending', 'confirmed']);
+
+    activeBookings    = (bookings || []).length;
+    confirmedBookings = (bookings || []).filter(b => b.status === 'confirmed').length;
+    clientsAffected   = new Set((bookings || []).map(b => b.user_id)).size;
+  }
+
+  res.json({
+    listings_count:     listingIds.length,
+    active_bookings:    activeBookings,
+    confirmed_bookings: confirmedBookings,
+    clients_affected:   clientsAffected,
+  });
+}));
+
+// DELETE /api/admin/partners/:id — Supprimer le partenaire (remet en client)
+// ✅ V10 : :id = user.id. Garde l'user mais retire son statut partenaire.
+router.delete('/partners/:id', asyncHandler(async (req, res) => {
+  const userId = req.params.id;
+
+  const { data: user } = await db.from('users')
+    .select('id, name, email, role').eq('id', userId).maybeSingle();
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  if (user.role === 'admin') return res.status(403).json({ error: 'Impossible de modifier un admin' });
+
+  const log = [];
+
+  // Récupérer le profil partner
+  const { data: partnerRow } = await db.from('partners')
+    .select('id').eq('user_id', userId).maybeSingle();
+
+  let listingsDeleted = 0;
+
+  if (partnerRow) {
+    // Annonces du partenaire → cascade
+    const { data: listings } = await db.from('listings')
+      .select('id, title').eq('partner_id', partnerRow.id);
+    const listingIds = (listings || []).map(l => l.id);
+    log.push(`Listings: ${listingIds.length}`);
+
+    if (listingIds.length > 0) {
+      // Notifier les clients avec réservations actives
+      const { data: activeBookings } = await db.from('bookings')
+        .select('id, user_id')
+        .in('listing_id', listingIds)
+        .in('status', ['pending', 'confirmed']);
+
+      if (activeBookings?.length) {
+        const uniqueClientIds = [...new Set(activeBookings.map(b => b.user_id))];
+        try {
+          await db.from('notifications').insert(
+            uniqueClientIds.map(cid => ({
+              user_id: cid,
+              title:   'Réservation annulée',
+              body:    `Le partenaire (${user.name}) a été retiré de la plateforme. Votre réservation a été annulée. Contactez le support ZUKAGO.`,
+              type:    'info',
+            }))
+          );
+        } catch (e) { log.push(`Client notif error: ${e.message}`); }
+      }
+
+      // Cloudinary
+      const { data: photos } = await db.from('listing_photos')
+        .select('public_id').in('listing_id', listingIds);
+      if (photos?.length) {
+        const { deleteImage } = require('../config/cloudinary');
+        await Promise.allSettled(
+          photos.filter(p => p.public_id).map(p => deleteImage(p.public_id).catch(() => null))
+        );
+      }
+
+      // Cascade DB
+      try { await db.from('reviews').delete().in('listing_id', listingIds); } catch (e) { log.push(`reviews: ${e.message}`); }
+      try { await db.from('favorites').delete().in('listing_id', listingIds); } catch (e) { log.push(`favorites: ${e.message}`); }
+      try { await db.from('listing_photos').delete().in('listing_id', listingIds); } catch (e) { log.push(`listing_photos: ${e.message}`); }
+      try { await db.from('listing_amenities').delete().in('listing_id', listingIds); } catch (e) { log.push(`listing_amenities: ${e.message}`); }
+      try { await db.from('bookings').delete().in('listing_id', listingIds); } catch (e) { log.push(`bookings: ${e.message}`); }
+
+      await db.from('listings').delete().in('id', listingIds);
+      listingsDeleted = listingIds.length;
+    }
+
+    // Retraits du partenaire
+    try { await db.from('withdrawals').delete().eq('partner_id', partnerRow.id); } catch (e) { log.push(`withdrawals: ${e.message}`); }
+
+    // Supprimer le profil partner lui-même
+    await db.from('partners').delete().eq('id', partnerRow.id);
+    log.push('Partner profile deleted');
+  }
+
+  // Remettre l'utilisateur en client (ne PAS supprimer le compte)
+  await db.from('users').update({
+    role:             'client',
+    demande_verified: false,
+    verified:         false,
+    updated_at:       new Date().toISOString(),
+  }).eq('id', userId);
+
+  // Notifier le user
+  try {
+    await db.from('notifications').insert({
+      user_id: userId,
+      title:   'Statut partenaire retiré',
+      body:    'Votre compte a été remis en statut client. Contactez le support ZUKAGO pour plus d\'informations.',
+      type:    'info',
+    });
+  } catch (e) { /* ignore */ }
+
+  console.log(`[Admin] ✅ Partner ${user.email} removed — back to client`, log);
+  res.json({
+    message:          `Partenaire ${user.name} supprimé (compte remis en client)`,
+    listings_deleted: listingsDeleted,
+    log,
+  });
 }));
 
 // ─── ANNONCES ─────────────────────────────────────────────────────────────────
