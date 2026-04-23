@@ -37,7 +37,7 @@ app.use('/api/reviews',       require('./routes/reviews'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/uploads',       require('./routes/uploads'));
 app.use('/api/places',        require('./routes/places'));
-app.use('/api/carpool',       require('./routes/carpool'));   // ✅ V9 : covoiturage
+// ❌ V10 : route carpool supprimée — tout passe par /api/listings avec type='cov'
 
 // Health check
 app.get('/health', (req, res) => {

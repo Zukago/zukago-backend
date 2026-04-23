@@ -29,7 +29,10 @@ router.get('/', optionalAuth, asyncHandler(async (req, res) => {
   if (featured === 'true') q = q.eq('featured', true);
   if (search)     q = q.or(`title.ilike.%${search}%,description.ilike.%${search}%`);
 
-  if (sort === 'price_asc')  q = q.order('price', { ascending: true });
+  // ✅ V10 : tri spécial covoiturage par date de départ
+  if (type === 'cov') {
+    q = q.order('depart_date', { ascending: true }).order('depart_time', { ascending: true });
+  } else if (sort === 'price_asc')  q = q.order('price', { ascending: true });
   else if (sort === 'price_desc') q = q.order('price', { ascending: false });
   else q = q.order('featured', { ascending: false }).order('created_at', { ascending: false });
 
@@ -106,10 +109,11 @@ router.get('/:id/availability', asyncHandler(async (req, res) => {
 }));
 
 // ─── POST /api/listings — Créer annonce (partenaire) ─────────────────────────
+// ✅ V10 : support du type 'cov' (covoiturage)
 router.post('/', authenticate, requirePartner, [
-  body('type').isIn(['apt', 'hotel', 'car', 'driver']),
+  body('type').isIn(['apt', 'hotel', 'car', 'driver', 'cov']),  // ✅ V10 : + 'cov'
   body('title').trim().isLength({ min: 2, max: 100 }),
-  body('description').trim().isLength({ min: 2 }),
+  body('description').optional({ checkFalsy: true }).trim().isLength({ min: 2 }),
   body('price').isNumeric(),
   body('city_code').optional(),
   body('quartier').optional(),
@@ -140,8 +144,64 @@ router.post('/', authenticate, requirePartner, [
   }
   const partnerId = partner.id;
 
-  const { type, title, description, sub_type, city_code, city_name, quartier, address,
-          price, price_weekend, unit, min_nights, caution, whatsapp, contact_email, amenities } = req.body;
+  const {
+    type, title, description, sub_type, city_code, city_name, quartier, address,
+    price, price_weekend, unit, min_nights, caution, whatsapp, contact_email, amenities,
+    // ✅ V10 : champs covoiturage
+    from_city, to_city, via_cities, depart_date, depart_time,
+    seats_total, seats_available, car_model, car_color, plate_number,
+    smoking_ok, music_ok, pets_ok, luggage, status,
+  } = req.body;
+
+  // ═══════════════════════════════════════════════════════════════════
+  // ✅ V10 : Branche COVOITURAGE — logique spéciale
+  // ═══════════════════════════════════════════════════════════════════
+  if (type === 'cov') {
+    if (!from_city || !to_city || !depart_date || !depart_time) {
+      return res.status(400).json({ error: 'Champs covoiturage manquants (from_city, to_city, depart_date, depart_time)' });
+    }
+    if (!seats_total || seats_total < 1) {
+      return res.status(400).json({ error: 'seats_total invalide' });
+    }
+
+    const { data: covListing, error: covError } = await db.from('listings').insert({
+      partner_id: partnerId,
+      type: 'cov',
+      title:        title || `${from_city} → ${to_city}`,
+      description:  description || '',
+      price,
+      unit:         'place',
+      status:       status || 'active',  // covoit visible direct (pas d'approbation admin bloquante)
+      whatsapp,
+      contact_email,
+      // Champs covoit
+      from_city,
+      to_city,
+      via_cities:       Array.isArray(via_cities) ? via_cities : [],
+      depart_date,
+      depart_time,
+      seats_total:      parseInt(seats_total, 10),
+      seats_available:  parseInt(seats_available ?? seats_total, 10),
+      car_model:        car_model  || null,
+      car_color:        car_color  || null,
+      plate_number:     plate_number || null,
+      smoking_ok:       smoking_ok !== undefined ? !!smoking_ok : true,
+      music_ok:         music_ok   !== undefined ? !!music_ok   : true,
+      pets_ok:          pets_ok    !== undefined ? !!pets_ok    : false,
+      luggage:          luggage    || 'medium',
+    }).select().single();
+
+    if (covError) throw new Error(covError.message);
+
+    return res.status(201).json({
+      listing: covListing,
+      message: 'Trajet covoiturage publié',
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════
+  // Branche CLASSIQUE (apt / hotel / car / driver) — comportement inchangé
+  // ═══════════════════════════════════════════════════════════════════
 
   // ✅ Auto-création ville si elle n'existe pas dans cities — §3.7
   let validCityCode = city_code || null;
