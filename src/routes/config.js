@@ -27,6 +27,8 @@ router.get('/app', asyncHandler(async (req, res) => {
     // ✅ NOUVEAU V6 : contenu dynamique par service
     { data: howItWorksByServiceRaw },
     { data: partnerSectionByServiceRaw },
+    // ✅ NOUVEAU V8 : équipements par service
+    { data: amenitiesByServiceRaw },
   ] = await Promise.all([
     db.from('app_config').select('key, value, type'),
     db.from('services').select('*').eq('enabled', true).order('sort_order'),
@@ -44,6 +46,8 @@ router.get('/app', asyncHandler(async (req, res) => {
     // ✅ NOUVEAU V6 : 2 nouvelles queries
     db.from('how_it_works_by_service').select('*').eq('lang', lang).order('service_code').order('step_order'),
     db.from('partner_section_by_service').select('*').eq('lang', lang),
+    // ✅ NOUVEAU V8 : équipements par service
+    db.from('amenities_by_service').select('*').eq('lang', lang).order('service_code').order('sort_order'),
   ]);
 
   // Parser les configs
@@ -102,6 +106,18 @@ router.get('/app', asyncHandler(async (req, res) => {
     };
   }
 
+  // ✅ NOUVEAU V8 : Équipements groupés par service
+  const amenitiesByService = {};
+  for (const row of amenitiesByServiceRaw || []) {
+    if (!amenitiesByService[row.service_code]) amenitiesByService[row.service_code] = [];
+    amenitiesByService[row.service_code].push({
+      code:       row.code,
+      label:      row.label,
+      icon_name:  row.icon_name,
+      sort_order: row.sort_order,
+    });
+  }
+
   res.json({
     appConfig,
     services,
@@ -122,6 +138,8 @@ router.get('/app', asyncHandler(async (req, res) => {
     // ✅ NOUVEAU V6 : contenu dynamique par service
     howItWorksByService,
     partnerSectionByService,
+    // ✅ NOUVEAU V8 : équipements par service
+    amenitiesByService,
     calendar: {
       months: appConfig[`calendar_months_${lang}`] || appConfig.calendar_months_fr,
       days:   appConfig[`calendar_days_${lang}`]   || appConfig.calendar_days_fr,
