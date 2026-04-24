@@ -1,7 +1,10 @@
 /**
- * ZUKAGO — routes/places.js
+ * ZUKAGO — routes/places.js (V11)
  * Google Places API côté serveur — clé sécurisée dans Railway
- * §3.7 — rien hardcodé, clé dans variables d'environnement
+ *
+ * V11 : recherche permissive (types='geocode' par défaut) + biais Cameroun
+ *       + extraction intelligente de ville/quartier dans /details
+ *       → permet de trouver quartiers (Bonamoussadi, Akwa) et établissements
  */
 
 const express = require('express');
@@ -11,10 +14,23 @@ const router = express.Router();
 
 const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
-// ─── GET /api/places/autocomplete?input=Douala&language=fr ───────────────────
-// Autocomplétion de villes/adresses via Google Places
+// Centre du Cameroun pour biais géographique (Yaoundé)
+// Les résultats camerounais remontent en priorité mais sans exclure le reste du monde.
+const CAMEROON_BIAS = {
+  location: '7.3697,12.3547',  // centre approx. du Cameroun
+  radius:   '500000',           // 500 km
+};
+
+// ─── GET /api/places/autocomplete ────────────────────────────────────────────
+// Params :
+//   - input   : texte cherché (min 2 caractères)
+//   - language: 'fr' par défaut
+//   - types   : 'geocode' par défaut (villes + quartiers + lieux + adresses)
+//               Autres valeurs : '(cities)', '(regions)', 'address', 'establishment'
+// ✅ V11 : par défaut 'geocode' = recherche large permettant de trouver quartiers comme
+//         "Bonamoussadi", "Akwa", etc. qui ne sont pas des villes officielles.
 router.get('/autocomplete', asyncHandler(async (req, res) => {
-  const { input, language = 'fr', types = '(cities)' } = req.query;
+  const { input, language = 'fr', types = 'geocode' } = req.query;
 
   if (!input || input.trim().length < 2) {
     return res.json({ predictions: [] });
@@ -27,10 +43,11 @@ router.get('/autocomplete', asyncHandler(async (req, res) => {
   const params = new URLSearchParams({
     input:    input.trim(),
     language,
-    types,    // '(cities)' pour villes, 'geocode' pour adresses complètes
+    types,
     key:      GOOGLE_API_KEY,
-    // Bias vers l'Afrique — priorité sans restriction stricte
-    components: '',
+    // ✅ V11 : biais vers le Cameroun (résultats locaux en premier, sans exclure le reste)
+    location: CAMEROON_BIAS.location,
+    radius:   CAMEROON_BIAS.radius,
   });
 
   const url = `https://maps.googleapis.com/maps/api/place/autocomplete/json?${params}`;
@@ -56,7 +73,8 @@ router.get('/autocomplete', asyncHandler(async (req, res) => {
 }));
 
 // ─── GET /api/places/details?place_id=xxx ────────────────────────────────────
-// Détails d'un lieu — coordonnées GPS, pays, ville
+// ✅ V11 : extraction intelligente ville + quartier + pays depuis address_components
+//          pour auto-remplir les 3 champs du wizard (ville, quartier, adresse).
 router.get('/details', asyncHandler(async (req, res) => {
   const { place_id, language = 'fr' } = req.query;
 
@@ -66,7 +84,7 @@ router.get('/details', asyncHandler(async (req, res) => {
   const params = new URLSearchParams({
     place_id,
     language,
-    fields: 'geometry,address_components,formatted_address,name',
+    fields: 'geometry,address_components,formatted_address,name,types',
     key:    GOOGLE_API_KEY,
   });
 
@@ -79,28 +97,69 @@ router.get('/details', asyncHandler(async (req, res) => {
   }
 
   const r = data.result;
+  const components = r.address_components || [];
 
-  // Extraire ville et pays depuis address_components
+  // Helper : récupère le premier component matchant un des types donnés
   const getComponent = (types) => {
-    const comp = (r.address_components || []).find(c =>
+    const comp = components.find(c =>
       types.some(t => c.types.includes(t))
     );
     return comp?.long_name || '';
   };
 
-  const city    = getComponent(['locality', 'administrative_area_level_2', 'administrative_area_level_1']);
+  // ✅ V11 : extraction intelligente par hiérarchie de types
+  //
+  // Pour "Bonamoussadi, Douala, Cameroun" les address_components sont généralement :
+  //   - sublocality / sublocality_level_1 / neighborhood → Bonamoussadi
+  //   - locality → Douala
+  //   - administrative_area_level_1 → Littoral
+  //   - country → Cameroun
+  //
+  // Pour "Marché Central, Akwa, Douala, Cameroun" :
+  //   - establishment / point_of_interest → Marché Central
+  //   - sublocality → Akwa
+  //   - locality → Douala
+  //
+  // Pour une ville officielle "Douala" seule :
+  //   - locality → Douala (pas de sublocality)
+
+  // Quartier (sublocality, neighborhood) — peut être vide si c'est une ville officielle
+  const neighborhood = getComponent([
+    'sublocality_level_1',
+    'sublocality',
+    'neighborhood',
+  ]);
+
+  // Ville (locality — priorité) sinon niveau admin 2
+  const city = getComponent(['locality'])
+    || getComponent(['administrative_area_level_2'])
+    || getComponent(['administrative_area_level_1']);
+
   const country = getComponent(['country']);
-  const lat     = r.geometry?.location?.lat;
-  const lng     = r.geometry?.location?.lng;
+
+  // Nom court du lieu (nom d'établissement ou titre principal)
+  const placeName = r.name || '';
+
+  // Si l'user a cherché un établissement (ex: "Marché Central"), on le met comme adresse/label
+  // Si c'est juste un quartier → placeName == neighborhood (on ne duplique pas)
+  const isEstablishment = (r.types || []).some(t =>
+    t === 'establishment' || t === 'point_of_interest'
+  );
+
+  const lat = r.geometry?.location?.lat;
+  const lng = r.geometry?.location?.lng;
 
   res.json({
     result: {
       place_id,
-      name:              r.name || city,
+      name:              placeName,
       formatted_address: r.formatted_address,
-      city,
-      country,
-      coords: lat && lng ? { latitude: lat, longitude: lng } : null,
+      city,                                    // Ex: "Douala"
+      neighborhood,                            // Ex: "Bonamoussadi"  (peut être vide)
+      country,                                 // Ex: "Cameroun"
+      is_establishment:  isEstablishment,      // true si lieu/commerce
+      types:             r.types || [],
+      coords: lat && lng ? { lat, lng, latitude: lat, longitude: lng } : null,
     },
   });
 }));
