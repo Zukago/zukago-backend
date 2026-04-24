@@ -264,34 +264,50 @@ router.post('/', authenticate, requirePartner, [
   // ═══════════════════════════════════════════════════════════════════
 
   // ✅ Auto-création ville si elle n'existe pas dans cities — §3.7
+  // ✅ V11 : vérif D'ABORD par label (case-insensitive) pour éviter les doublons
+  //    (bug V10 : on ne vérifiait que par code généré, donc 'baf' + 'bafoussam' = 2 lignes)
   let validCityCode = city_code || null;
   const cityLabel   = city_name || city_code || '';
 
   if (cityLabel) {
-    const generatedCode = cityLabel
-      .toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]/g, '_')
-      .substring(0, 20);
+    // 1) D'abord chercher si une ville avec ce LABEL existe déjà (case-insensitive)
+    const { data: existingByLabel } = await db.from('cities')
+      .select('code, label')
+      .ilike('label', cityLabel.trim())
+      .limit(1);
 
-    const { data: existing } = await db.from('cities')
-      .select('code').eq('code', generatedCode).single();
-
-    if (existing) {
-      validCityCode = generatedCode;
+    if (existingByLabel && existingByLabel.length > 0) {
+      // Ville déjà en DB avec ce label → on réutilise son code, pas de doublon
+      validCityCode = existingByLabel[0].code;
     } else {
-      try {
-        await db.from('cities').insert({
-          code:       generatedCode,
-          label:      cityLabel,
-          active:     true,
-          sort_order: 999,
-        });
+      // 2) Sinon, générer un code et créer la ville
+      const generatedCode = cityLabel
+        .toLowerCase()
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-z0-9]/g, '_')
+        .substring(0, 20);
+
+      // Vérif de secours par code (au cas où)
+      const { data: existingByCode } = await db.from('cities')
+        .select('code').eq('code', generatedCode).single();
+
+      if (existingByCode) {
         validCityCode = generatedCode;
-      } catch(e) {
-        const { data: retry } = await db.from('cities')
-          .select('code').eq('label', cityLabel).single();
-        validCityCode = retry?.code || null;
+      } else {
+        try {
+          await db.from('cities').insert({
+            code:       generatedCode,
+            label:      cityLabel.trim(),
+            active:     true,
+            sort_order: 999,
+          });
+          validCityCode = generatedCode;
+        } catch(e) {
+          // Race condition : qqun d'autre a créé la ville entre-temps → retry by label
+          const { data: retry } = await db.from('cities')
+            .select('code').ilike('label', cityLabel.trim()).limit(1);
+          validCityCode = retry?.[0]?.code || null;
+        }
       }
     }
   }
