@@ -58,7 +58,7 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
     .select(`
       *,
       listing_photos(url, public_id, is_main, sort_order),
-      listing_amenities(amenity_code, amenities(label, emoji)),
+      listing_amenities(amenity_code, amenities(label, emoji, category)),
       reviews(id, rating, comment, verified, created_at, users(name, avatar)),
       partners(id, user_id, users(name, avatar, verified))
     `)
@@ -84,7 +84,36 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
     isFavorite = !!fav;
   }
 
-  res.json({ listing: { ...listing, rating, reviews_count: listing.reviews?.length, isFavorite } });
+  // ✅ V11 : room_types pour hotel
+  let roomTypes = null;
+  if (listing.type === 'hotel') {
+    const { data: rt } = await db.from('listing_room_types')
+      .select('*')
+      .eq('listing_id', listing.id)
+      .order('sort_order', { ascending: true });
+    roomTypes = rt || [];
+  }
+
+  // ✅ V11 : politique d'annulation détaillée (texte client)
+  let cancelPolicyDetails = null;
+  if (listing.cancel_policy) {
+    const { data: cp } = await db.from('cancellation_policies')
+      .select('code, label, description, emoji')
+      .eq('code', listing.cancel_policy)
+      .single();
+    cancelPolicyDetails = cp || null;
+  }
+
+  res.json({
+    listing: {
+      ...listing,
+      rating,
+      reviews_count: listing.reviews?.length,
+      isFavorite,
+      room_types: roomTypes,
+      cancel_policy_details: cancelPolicyDetails,
+    },
+  });
 }));
 
 
@@ -110,11 +139,12 @@ router.get('/:id/availability', asyncHandler(async (req, res) => {
 
 // ─── POST /api/listings — Créer annonce (partenaire) ─────────────────────────
 // ✅ V10 : support du type 'cov' (covoiturage)
+// ✅ V11 : support de tous les champs apt/hotel/car/driver + room_types pour hotel
 router.post('/', authenticate, requirePartner, [
-  body('type').isIn(['apt', 'hotel', 'car', 'driver', 'cov']),  // ✅ V10 : + 'cov'
+  body('type').isIn(['apt', 'hotel', 'car', 'driver', 'cov']),
   body('title').trim().isLength({ min: 2, max: 100 }),
   body('description').optional({ checkFalsy: true }).trim().isLength({ min: 2 }),
-  body('price').isNumeric(),
+  body('price').optional({ checkFalsy: true }).isNumeric(),
   body('city_code').optional(),
   body('quartier').optional(),
 ], asyncHandler(async (req, res) => {
@@ -145,9 +175,39 @@ router.post('/', authenticate, requirePartner, [
   const partnerId = partner.id;
 
   const {
+    // COMMUN
     type, title, description, sub_type, city_code, city_name, quartier, address,
-    price, price_weekend, unit, min_nights, caution, whatsapp, contact_email, amenities,
-    // ✅ V10 : champs covoiturage
+    price, price_weekend, unit, min_nights, max_nights, caution, whatsapp, contact_email, amenities,
+    cancel_policy,
+    check_in_time, check_out_time,
+
+    // V11 COMMUN APT/HOTEL
+    capacity, bedrooms, beds, bathrooms, surface_m2,
+    smoking_allowed, pets_allowed, children_allowed,
+    events_party, events_birthday, events_wedding,
+    events_seminar, events_baptism, events_conference,
+    house_rules,
+
+    // V11 APT + CAR : prix long terme
+    price_5nights, price_week, price_month,
+
+    // V11 HOTEL
+    stars, standing, total_rooms, year_built, breakfast_policy, deposit_pct,
+    room_types,   // array d'objets : [{name, capacity, price_night, price_5nights, price_week, price_month, breakfast_included, quantity}]
+
+    // V11 CAR
+    brand, model, year, color, fuel, transmission, seats_passenger, doors,
+    air_conditioning, bluetooth, trunk_size, with_driver, without_driver,
+    price_in_city, price_out_city, long_rental_discount_pct, fuel_included,
+    pickup_location, return_location, min_age, license_required, deposit_type, insurance_type,
+
+    // V11 DRIVER
+    years_experience, languages, license_category, service_cities,
+    long_trips_ok, intl_trips_ok,
+    price_halfday, price_hour, price_longdistance, airport_fee,
+    work_days, work_hours_start, work_hours_end, available_nights,
+
+    // COVOIT (V10)
     from_city, to_city, via_cities, depart_date, depart_time,
     seats_total, seats_available, car_model, car_color, plate_number,
     smoking_ok, music_ok, pets_ok, luggage, status,
@@ -171,10 +231,9 @@ router.post('/', authenticate, requirePartner, [
       description:  description || '',
       price,
       unit:         'place',
-      status:       status || 'active',  // covoit visible direct (pas d'approbation admin bloquante)
+      status:       status || 'active',
       whatsapp,
       contact_email,
-      // Champs covoit
       from_city,
       to_city,
       via_cities:       Array.isArray(via_cities) ? via_cities : [],
@@ -189,6 +248,7 @@ router.post('/', authenticate, requirePartner, [
       music_ok:         music_ok   !== undefined ? !!music_ok   : true,
       pets_ok:          pets_ok    !== undefined ? !!pets_ok    : false,
       luggage:          luggage    || 'medium',
+      cancel_policy:    cancel_policy || null,
     }).select().single();
 
     if (covError) throw new Error(covError.message);
@@ -200,7 +260,7 @@ router.post('/', authenticate, requirePartner, [
   }
 
   // ═══════════════════════════════════════════════════════════════════
-  // Branche CLASSIQUE (apt / hotel / car / driver) — comportement inchangé
+  // Branche CLASSIQUE (apt / hotel / car / driver)
   // ═══════════════════════════════════════════════════════════════════
 
   // ✅ Auto-création ville si elle n'existe pas dans cities — §3.7
@@ -208,21 +268,18 @@ router.post('/', authenticate, requirePartner, [
   const cityLabel   = city_name || city_code || '';
 
   if (cityLabel) {
-    // Générer un code propre depuis le nom : "Bafang" → "bafang", "Dakar" → "dakar"
     const generatedCode = cityLabel
       .toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // enlever accents
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
       .replace(/[^a-z0-9]/g, '_')
       .substring(0, 20);
 
-    // Vérifier si la ville existe déjà
     const { data: existing } = await db.from('cities')
       .select('code').eq('code', generatedCode).single();
 
     if (existing) {
       validCityCode = generatedCode;
     } else {
-      // Créer la ville automatiquement
       try {
         await db.from('cities').insert({
           code:       generatedCode,
@@ -232,7 +289,6 @@ router.post('/', authenticate, requirePartner, [
         });
         validCityCode = generatedCode;
       } catch(e) {
-        // Si conflit (race condition) — réessayer avec select
         const { data: retry } = await db.from('cities')
           .select('code').eq('label', cityLabel).single();
         validCityCode = retry?.code || null;
@@ -240,7 +296,10 @@ router.post('/', authenticate, requirePartner, [
     }
   }
 
-  const { data: listing, error } = await db.from('listings').insert({
+  // ✅ V11 : construire l'objet d'insertion avec uniquement les champs pertinents selon le type
+  // Les champs non fournis / non-applicables restent NULL en DB (cohérent)
+  const listingData = {
+    // Communs
     partner_id: partnerId,
     type, title, description, sub_type,
     city_code: validCityCode,
@@ -249,11 +308,109 @@ router.post('/', authenticate, requirePartner, [
     price, price_weekend: price_weekend || null,
     unit: unit || (type === 'car' || type === 'driver' ? 'jour' : 'nuit'),
     min_nights: min_nights || 1,
+    max_nights: max_nights || null,
     caution: caution || null,
     whatsapp, contact_email,
     status: 'pending',
-  }).select().single();
+    cancel_policy: cancel_policy || null,
+    check_in_time: check_in_time || null,
+    check_out_time: check_out_time || null,
+  };
 
+  // ── APT / HOTEL : caractéristiques communes ──
+  if (type === 'apt' || type === 'hotel') {
+    listingData.capacity   = capacity  || null;
+    listingData.bedrooms   = bedrooms  || null;
+    listingData.beds       = beds      || null;
+    listingData.bathrooms  = bathrooms || null;
+    listingData.surface_m2 = surface_m2 || null;
+    // Règles maison
+    listingData.smoking_allowed  = !!smoking_allowed;
+    listingData.pets_allowed     = !!pets_allowed;
+    listingData.children_allowed = children_allowed !== undefined ? !!children_allowed : true;
+    listingData.events_party     = !!events_party;
+    listingData.events_birthday  = !!events_birthday;
+    listingData.events_wedding   = !!events_wedding;
+    listingData.events_seminar   = !!events_seminar;
+    listingData.events_baptism   = !!events_baptism;
+    listingData.events_conference= !!events_conference;
+    listingData.house_rules      = house_rules || null;
+  }
+
+  // ── APT uniquement : prix long terme ──
+  if (type === 'apt') {
+    listingData.price_5nights = price_5nights || null;
+    listingData.price_week    = price_week    || null;
+    listingData.price_month   = price_month   || null;
+  }
+
+  // ── HOTEL : champs spécifiques ──
+  if (type === 'hotel') {
+    listingData.stars             = stars || null;
+    listingData.standing          = standing || null;
+    listingData.total_rooms       = total_rooms || null;
+    listingData.year_built        = year_built || null;
+    listingData.breakfast_policy  = breakfast_policy || null;
+    listingData.deposit_pct       = deposit_pct || null;
+  }
+
+  // ── CAR : champs spécifiques ──
+  if (type === 'car') {
+    listingData.brand                    = brand || null;
+    listingData.model                    = model || null;
+    listingData.year                     = year  || null;
+    listingData.color                    = color || null;
+    listingData.fuel                     = fuel || null;
+    listingData.transmission             = transmission || null;
+    listingData.seats_passenger          = seats_passenger || null;
+    listingData.doors                    = doors || null;
+    listingData.air_conditioning         = air_conditioning !== undefined ? !!air_conditioning : true;
+    listingData.bluetooth                = !!bluetooth;
+    listingData.trunk_size               = trunk_size || null;
+    listingData.with_driver              = !!with_driver;
+    listingData.without_driver           = without_driver !== undefined ? !!without_driver : true;
+    listingData.price_week               = price_week || null;
+    listingData.price_month              = price_month || null;
+    listingData.price_in_city            = price_in_city || null;
+    listingData.price_out_city           = price_out_city || null;
+    listingData.long_rental_discount_pct = long_rental_discount_pct || null;
+    listingData.fuel_included            = !!fuel_included;
+    listingData.pickup_location          = pickup_location || null;
+    listingData.return_location          = return_location || null;
+    listingData.min_age                  = min_age || null;
+    listingData.license_required         = license_required || null;
+    listingData.deposit_type             = deposit_type || null;
+    listingData.insurance_type           = insurance_type || null;
+  }
+
+  // ── DRIVER : champs spécifiques ──
+  if (type === 'driver') {
+    listingData.years_experience  = years_experience || null;
+    listingData.languages         = Array.isArray(languages) ? languages : null;
+    listingData.license_category  = license_category || null;
+    listingData.service_cities    = Array.isArray(service_cities) ? service_cities : null;
+    listingData.long_trips_ok     = !!long_trips_ok;
+    listingData.intl_trips_ok     = !!intl_trips_ok;
+    listingData.price_halfday     = price_halfday || null;
+    listingData.price_hour        = price_hour || null;
+    listingData.price_longdistance= price_longdistance || null;
+    listingData.airport_fee       = airport_fee || null;
+    listingData.fuel_included     = !!fuel_included;
+    listingData.work_days         = Array.isArray(work_days) ? work_days : null;
+    listingData.work_hours_start  = work_hours_start || null;
+    listingData.work_hours_end    = work_hours_end || null;
+    listingData.available_nights  = !!available_nights;
+    // Véhicule du chauffeur (réutilise colonnes car)
+    listingData.brand             = brand || null;
+    listingData.model             = model || null;
+    listingData.year              = year  || null;
+    listingData.color             = color || null;
+    listingData.seats_passenger   = seats_passenger || null;
+    listingData.air_conditioning  = air_conditioning !== undefined ? !!air_conditioning : true;
+    listingData.bluetooth         = !!bluetooth;
+  }
+
+  const { data: listing, error } = await db.from('listings').insert(listingData).select().single();
   if (error) throw new Error(error.message);
 
   // Ajouter équipements
@@ -261,6 +418,25 @@ router.post('/', authenticate, requirePartner, [
     await db.from('listing_amenities').insert(
       amenities.map(code => ({ listing_id: listing.id, amenity_code: code }))
     );
+  }
+
+  // ✅ V11 : Ajouter types de chambres pour HOTEL
+  if (type === 'hotel' && Array.isArray(room_types) && room_types.length > 0) {
+    const roomTypesToInsert = room_types.map((rt, idx) => ({
+      listing_id:         listing.id,
+      name:               rt.name,
+      capacity:           parseInt(rt.capacity, 10) || 1,
+      price_night:        parseInt(rt.price_night, 10),
+      price_5nights:      rt.price_5nights ? parseInt(rt.price_5nights, 10) : null,
+      price_week:         rt.price_week    ? parseInt(rt.price_week, 10)    : null,
+      price_month:        rt.price_month   ? parseInt(rt.price_month, 10)   : null,
+      breakfast_included: !!rt.breakfast_included,
+      quantity:           parseInt(rt.quantity, 10) || 1,
+      photos:             Array.isArray(rt.photos) ? rt.photos : [],
+      sort_order:         idx,
+    }));
+    const { error: rtError } = await db.from('listing_room_types').insert(roomTypesToInsert);
+    if (rtError) console.log('Room types insert error:', rtError.message);
   }
 
   res.status(201).json({ listing, message: 'Annonce soumise pour approbation (24-48h)' });
