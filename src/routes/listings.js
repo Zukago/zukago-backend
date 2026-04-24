@@ -613,7 +613,126 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
 }));
 
 
-// ─── POST /api/listings/:id/favorite — Ajouter/retirer favori ────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// ✅ V11 SPRINT B — Gestion des types de chambres d'un hôtel
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── GET /api/listings/:id/room-types — Lister les types de chambres ────────
+router.get('/:id/room-types', asyncHandler(async (req, res) => {
+  const { data: rooms, error } = await db.from('listing_room_types')
+    .select('*')
+    .eq('listing_id', req.params.id)
+    .order('sort_order', { ascending: true });
+  if (error) throw new Error(error.message);
+  res.json(rooms || []);
+}));
+
+// ─── POST /api/listings/:id/room-types — Ajouter un type de chambre ─────────
+// Body : { name, capacity, price_night, price_5nights?, price_week?, price_month?,
+//          breakfast_included?, quantity, photos? (array URLs) }
+router.post('/:id/room-types', authenticate, asyncHandler(async (req, res) => {
+  const listingId = req.params.id;
+
+  // Vérifier que le listing appartient à l'user (ou admin)
+  const { data: listing } = await db.from('listings')
+    .select('id, partner_id, partners(user_id)')
+    .eq('id', listingId).single();
+  if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
+  if (req.user.role !== 'admin' && listing.partners?.user_id !== req.user.id) {
+    return res.status(403).json({ error: 'Non autorisé' });
+  }
+
+  const {
+    name, capacity, price_night, price_5nights, price_week, price_month,
+    breakfast_included, quantity, photos, sort_order,
+  } = req.body;
+
+  if (!name || !price_night) {
+    return res.status(400).json({ error: 'name et price_night sont obligatoires' });
+  }
+
+  // Trouver le sort_order suivant si non fourni
+  let finalSortOrder = sort_order;
+  if (finalSortOrder === undefined || finalSortOrder === null) {
+    const { data: last } = await db.from('listing_room_types')
+      .select('sort_order').eq('listing_id', listingId)
+      .order('sort_order', { ascending: false }).limit(1);
+    finalSortOrder = (last?.[0]?.sort_order || 0) + 1;
+  }
+
+  const { data: newRoom, error } = await db.from('listing_room_types').insert({
+    listing_id:         listingId,
+    name,
+    capacity:           parseInt(capacity, 10) || 1,
+    price_night:        parseInt(price_night, 10),
+    price_5nights:      price_5nights ? parseInt(price_5nights, 10) : null,
+    price_week:         price_week    ? parseInt(price_week, 10)    : null,
+    price_month:        price_month   ? parseInt(price_month, 10)   : null,
+    breakfast_included: !!breakfast_included,
+    quantity:           parseInt(quantity, 10) || 1,
+    photos:             Array.isArray(photos) ? photos : [],
+    sort_order:         finalSortOrder,
+  }).select().single();
+
+  if (error) throw new Error(error.message);
+  res.status(201).json(newRoom);
+}));
+
+// ─── PATCH /api/listings/room-types/:id — Modifier un type de chambre ───────
+router.patch('/room-types/:id', authenticate, asyncHandler(async (req, res) => {
+  // Vérifier ownership via le listing parent
+  const { data: room } = await db.from('listing_room_types')
+    .select('id, listing_id, listings!inner(partner_id, partners(user_id))')
+    .eq('id', req.params.id).single();
+  if (!room) return res.status(404).json({ error: 'Type de chambre introuvable' });
+  if (req.user.role !== 'admin' && room.listings?.partners?.user_id !== req.user.id) {
+    return res.status(403).json({ error: 'Non autorisé' });
+  }
+
+  const allowed = [
+    'name', 'capacity', 'price_night', 'price_5nights', 'price_week', 'price_month',
+    'breakfast_included', 'quantity', 'photos', 'sort_order',
+  ];
+  const updates = { updated_at: new Date().toISOString() };
+  for (const k of allowed) {
+    if (req.body[k] !== undefined) {
+      if (['capacity', 'price_night', 'price_5nights', 'price_week', 'price_month', 'quantity', 'sort_order'].includes(k)) {
+        updates[k] = req.body[k] === null ? null : parseInt(req.body[k], 10);
+      } else if (k === 'breakfast_included') {
+        updates[k] = !!req.body[k];
+      } else if (k === 'photos') {
+        updates[k] = Array.isArray(req.body[k]) ? req.body[k] : [];
+      } else {
+        updates[k] = req.body[k];
+      }
+    }
+  }
+
+  const { data: updated, error } = await db.from('listing_room_types')
+    .update(updates)
+    .eq('id', req.params.id)
+    .select().single();
+  if (error) throw new Error(error.message);
+  res.json(updated);
+}));
+
+// ─── DELETE /api/listings/room-types/:id — Supprimer un type de chambre ─────
+router.delete('/room-types/:id', authenticate, asyncHandler(async (req, res) => {
+  const { data: room } = await db.from('listing_room_types')
+    .select('id, listing_id, listings!inner(partner_id, partners(user_id))')
+    .eq('id', req.params.id).single();
+  if (!room) return res.status(404).json({ error: 'Type de chambre introuvable' });
+  if (req.user.role !== 'admin' && room.listings?.partners?.user_id !== req.user.id) {
+    return res.status(403).json({ error: 'Non autorisé' });
+  }
+
+  const { error } = await db.from('listing_room_types').delete().eq('id', req.params.id);
+  if (error) throw new Error(error.message);
+  res.json({ deleted: true });
+}));
+
+
+
 router.post('/:id/favorite', authenticate, asyncHandler(async (req, res) => {
   const { data: existing } = await db.from('favorites')
     .select('user_id').eq('user_id', req.user.id).eq('listing_id', req.params.id).single();

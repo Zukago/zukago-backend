@@ -57,6 +57,32 @@ router.delete('/photo/:id', authenticate, asyncHandler(async (req, res) => {
   res.json({ message: 'Photo supprimée' });
 }));
 
+// ─── POST /api/uploads/room-type/:id — Photos d'un type de chambre (V11 Sprint B) ───
+router.post('/room-type/:id', authenticate,
+  uploadListing.array('photos', 5),
+  validatePhotos,
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+    if (!req.files?.length) return res.status(400).json({ error: 'Aucune photo envoyée' });
+
+    // Récupérer les URLs
+    const newUrls = req.files.map(file => file.path);
+
+    // Fusionner avec les photos existantes
+    const { data: existing } = await db.from('listing_room_types')
+      .select('photos').eq('id', id).single();
+    const merged = [...(existing?.photos || []), ...newUrls];
+
+    const { data: updated, error } = await db.from('listing_room_types')
+      .update({ photos: merged, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select().single();
+    if (error) throw new Error(error.message);
+
+    res.status(201).json({ room_type: updated, photos: newUrls, message: `${newUrls.length} photo(s) uploadée(s)` });
+  })
+);
+
 // ─── POST /api/uploads/document — Document partenaire ────────────────────────
 router.post('/document', authenticate,
   uploadDocument.single('document'),
