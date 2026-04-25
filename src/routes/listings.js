@@ -443,9 +443,7 @@ router.post('/', authenticate, requirePartner, [
       name:               rt.name,
       capacity:           parseInt(rt.capacity, 10) || 1,
       price_night:        parseInt(rt.price_night, 10),
-      price_5nights:      rt.price_5nights ? parseInt(rt.price_5nights, 10) : null,
-      price_week:         rt.price_week    ? parseInt(rt.price_week, 10)    : null,
-      price_month:        rt.price_month   ? parseInt(rt.price_month, 10)   : null,
+      price_weekend:      rt.price_weekend ? parseInt(rt.price_weekend, 10) : null,
       breakfast_included: !!rt.breakfast_included,
       quantity:           parseInt(rt.quantity, 10) || 1,
       photos:             Array.isArray(rt.photos) ? rt.photos : [],
@@ -643,7 +641,7 @@ router.post('/:id/room-types', authenticate, asyncHandler(async (req, res) => {
   }
 
   const {
-    name, capacity, price_night, price_5nights, price_week, price_month,
+    name, capacity, price_night, price_weekend,
     breakfast_included, quantity, photos, sort_order,
   } = req.body;
 
@@ -665,9 +663,7 @@ router.post('/:id/room-types', authenticate, asyncHandler(async (req, res) => {
     name,
     capacity:           parseInt(capacity, 10) || 1,
     price_night:        parseInt(price_night, 10),
-    price_5nights:      price_5nights ? parseInt(price_5nights, 10) : null,
-    price_week:         price_week    ? parseInt(price_week, 10)    : null,
-    price_month:        price_month   ? parseInt(price_month, 10)   : null,
+    price_weekend:      price_weekend ? parseInt(price_weekend, 10) : null,
     breakfast_included: !!breakfast_included,
     quantity:           parseInt(quantity, 10) || 1,
     photos:             Array.isArray(photos) ? photos : [],
@@ -690,13 +686,13 @@ router.patch('/room-types/:id', authenticate, asyncHandler(async (req, res) => {
   }
 
   const allowed = [
-    'name', 'capacity', 'price_night', 'price_5nights', 'price_week', 'price_month',
+    'name', 'capacity', 'price_night', 'price_weekend',
     'breakfast_included', 'quantity', 'photos', 'sort_order',
   ];
   const updates = { updated_at: new Date().toISOString() };
   for (const k of allowed) {
     if (req.body[k] !== undefined) {
-      if (['capacity', 'price_night', 'price_5nights', 'price_week', 'price_month', 'quantity', 'sort_order'].includes(k)) {
+      if (['capacity', 'price_night', 'price_weekend', 'quantity', 'sort_order'].includes(k)) {
         updates[k] = req.body[k] === null ? null : parseInt(req.body[k], 10);
       } else if (k === 'breakfast_included') {
         updates[k] = !!req.body[k];
