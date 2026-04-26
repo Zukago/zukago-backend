@@ -32,8 +32,13 @@ router.get('/partners', asyncHandler(async (req, res) => {
   const userIds = (users || []).map(u => u.id);
   let partnersMap = {};
   if (userIds.length > 0) {
+    // ✅ V12 : récupérer aussi KYC photos + permis pour affichage admin complet
     const { data: partnersData } = await db.from('partners')
-      .select('id, user_id, type, cni_number, whatsapp, address, bio, status, created_at')
+      .select(`
+        id, user_id, type, status, cni_number, whatsapp, address, bio, created_at,
+        cni_recto_url, cni_verso_url, selfie_url,
+        license_category, license_obtained, license_recto_url, license_verso_url, license_verified
+      `)
       .in('user_id', userIds);
     (partnersData || []).forEach(p => { partnersMap[p.user_id] = p; });
   }
@@ -861,8 +866,14 @@ router.get('/client-promotions', asyncHandler(async (req, res) => {
   const userIds = (data || []).map(u => u.id);
   let partnersMap = {};
   if (userIds.length > 0) {
+    // ✅ V12 : récupérer TOUS les champs nécessaires (KYC photos + permis + infos)
     const { data: partnersData } = await db.from('partners')
-      .select('user_id, company_name, whatsapp, country, city, service_category, commission_rate, created_at')
+      .select(`
+        id, user_id, type, status, cni_number, whatsapp, address, bio,
+        rejection_msg, created_at,
+        cni_recto_url, cni_verso_url, selfie_url,
+        license_category, license_obtained, license_recto_url, license_verso_url, license_verified
+      `)
       .in('user_id', userIds);
     (partnersData || []).forEach(p => { partnersMap[p.user_id] = p; });
   }
