@@ -290,11 +290,22 @@ router.delete('/partners/:id', asyncHandler(async (req, res) => {
 
 // ─── ANNONCES ─────────────────────────────────────────────────────────────────
 
-// GET /api/admin/listings — Toutes les annonces
+// GET /api/admin/listings — Toutes les annonces (avec photos + partner info)
 router.get('/listings', asyncHandler(async (req, res) => {
   const status = req.query.status || 'pending';
   const { data, error } = await db.from('listings')
-    .select('*')
+    .select(`
+      *,
+      listing_photos(id, url, is_main, sort_order),
+      listing_room_types(id, label, capacity, beds, bathrooms, price, price_weekend, photos),
+      partners(
+        id, user_id, type, status,
+        cni_number, whatsapp, address, bio,
+        cni_recto_url, cni_verso_url, selfie_url,
+        license_category, license_obtained, license_recto_url, license_verso_url, license_verified,
+        users(id, name, email, phone, avatar)
+      )
+    `)
     .eq('status', status)
     .order('created_at', { ascending: false });
   if (error) {
@@ -651,7 +662,7 @@ router.get('/users', asyncHandler(async (req, res) => {
   const offset = (page - 1) * limit;
 
   let query = db.from('users')
-    .select('id, name, email, role, active, verified, created_at, avatar, provider', { count: 'exact' })
+    .select('id, name, email, phone, whatsapp, role, active, verified, demande_verified, created_at, avatar, provider', { count: 'exact' })
     .order('created_at', { ascending: false })
     .range(offset, offset + limit - 1);
 
@@ -665,7 +676,29 @@ router.get('/users', asyncHandler(async (req, res) => {
   const { data: users, count, error } = await query;
   if (error) return res.status(500).json({ error: error.message });
 
-  res.json({ users: users || [], total: count || 0, page: Number(page), limit: Number(limit) });
+  // ✅ V12 : joindre partner_info pour les partenaires (pour cliquer vers AdminPartnerDetail)
+  const partnerUserIds = (users || [])
+    .filter(u => u.role === 'partner' || u.demande_verified)
+    .map(u => u.id);
+
+  let partnersMap = {};
+  if (partnerUserIds.length > 0) {
+    const { data: partnersData } = await db.from('partners')
+      .select(`
+        id, user_id, type, status, cni_number, whatsapp, address, bio, created_at,
+        cni_recto_url, cni_verso_url, selfie_url,
+        license_category, license_obtained, license_recto_url, license_verso_url, license_verified
+      `)
+      .in('user_id', partnerUserIds);
+    (partnersData || []).forEach(p => { partnersMap[p.user_id] = p; });
+  }
+
+  const enriched = (users || []).map(u => ({
+    ...u,
+    partner_info: partnersMap[u.id] || null,
+  }));
+
+  res.json({ users: enriched, total: count || 0, page: Number(page), limit: Number(limit) });
 }));
 
 // PATCH /api/admin/users/:id/suspend — Suspendre / réactiver un compte
