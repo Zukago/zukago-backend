@@ -293,26 +293,70 @@ router.delete('/partners/:id', asyncHandler(async (req, res) => {
 // GET /api/admin/listings — Toutes les annonces (avec photos + partner info)
 router.get('/listings', asyncHandler(async (req, res) => {
   const status = req.query.status || 'pending';
-  const { data, error } = await db.from('listings')
-    .select(`
-      *,
-      listing_photos(id, url, is_main, sort_order),
-      listing_room_types(id, label, capacity, beds, bathrooms, price, price_weekend, photos),
-      partners(
+
+  // Étape 1 : récupérer les annonces (comme avant — select * marche bien)
+  const { data: listings, error } = await db.from('listings')
+    .select('*')
+    .eq('status', status)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('Admin listings error:', error);
+    return res.status(500).json({ error: error.message });
+  }
+
+  if (!listings || listings.length === 0) {
+    return res.json({ listings: [], count: 0 });
+  }
+
+  // ✅ V12 : étape 2 — joindre photos
+  const listingIds = listings.map(l => l.id);
+  const { data: photos } = await db.from('listing_photos')
+    .select('id, listing_id, url, is_main, sort_order')
+    .in('listing_id', listingIds);
+
+  const photosByListing = {};
+  (photos || []).forEach(p => {
+    if (!photosByListing[p.listing_id]) photosByListing[p.listing_id] = [];
+    photosByListing[p.listing_id].push(p);
+  });
+
+  // ✅ V12 : étape 3 — joindre room_types pour hôtels
+  const { data: roomTypes } = await db.from('listing_room_types')
+    .select('id, listing_id, label, capacity, beds, bathrooms, price, price_weekend, photos')
+    .in('listing_id', listingIds);
+
+  const roomTypesByListing = {};
+  (roomTypes || []).forEach(rt => {
+    if (!roomTypesByListing[rt.listing_id]) roomTypesByListing[rt.listing_id] = [];
+    roomTypesByListing[rt.listing_id].push(rt);
+  });
+
+  // ✅ V12 : étape 4 — joindre partners (avec users)
+  const partnerIds = [...new Set(listings.map(l => l.partner_id).filter(Boolean))];
+  let partnersById = {};
+  if (partnerIds.length > 0) {
+    const { data: partnersData } = await db.from('partners')
+      .select(`
         id, user_id, type,
         cni_number, whatsapp, address, bio,
         cni_recto_url, cni_verso_url, selfie_url,
         license_category, license_obtained, license_recto_url, license_verso_url, license_verified,
         users(id, name, email, phone, avatar)
-      )
-    `)
-    .eq('status', status)
-    .order('created_at', { ascending: false });
-  if (error) {
-    console.error('Admin listings error:', error);
-    return res.status(500).json({ error: error.message });
+      `)
+      .in('id', partnerIds);
+    (partnersData || []).forEach(p => { partnersById[p.id] = p; });
   }
-  res.json({ listings: data || [], count: data?.length || 0 });
+
+  // Enrichir chaque listing avec ses relations
+  const enriched = listings.map(l => ({
+    ...l,
+    listing_photos:     photosByListing[l.id]      || [],
+    listing_room_types: roomTypesByListing[l.id]   || [],
+    partners:           partnersById[l.partner_id] || null,
+  }));
+
+  res.json({ listings: enriched, count: enriched.length });
 }));
 
 // PATCH /api/admin/listings/:id/approve — Approuver annonce
