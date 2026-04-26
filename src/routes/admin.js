@@ -299,7 +299,7 @@ router.get('/listings', asyncHandler(async (req, res) => {
       listing_photos(id, url, is_main, sort_order),
       listing_room_types(id, label, capacity, beds, bathrooms, price, price_weekend, photos),
       partners(
-        id, user_id, type, status,
+        id, user_id, type,
         cni_number, whatsapp, address, bio,
         cni_recto_url, cni_verso_url, selfie_url,
         license_category, license_obtained, license_recto_url, license_verso_url, license_verified,
