@@ -128,7 +128,11 @@ router.post('/withdraw', authenticate, requirePartner, asyncHandler(async (req, 
 // ─── GET /api/partners/status — Statut du compte partenaire ──────────────────
 router.get('/status', authenticate, asyncHandler(async (req, res) => {
   const { data: partner } = await db.from('partners')
-    .select('id, status, type, cni_number, whatsapp, address, bio, rejection_msg, created_at')
+    .select(`
+      id, status, type, cni_number, whatsapp, address, bio, rejection_msg, created_at,
+      cni_recto_url, cni_verso_url, selfie_url,
+      license_category, license_obtained, license_recto_url, license_verso_url, license_verified
+    `)
     .eq('user_id', req.user.id)
     .maybeSingle();
   res.json({ partner: partner || null });
@@ -136,11 +140,31 @@ router.get('/status', authenticate, asyncHandler(async (req, res) => {
 
 // ─── POST /api/partners/request — Soumettre demande partenaire ───────────────
 router.post('/request', authenticate, asyncHandler(async (req, res) => {
-  const { type, cni_number, whatsapp, address, bio } = req.body;
+  const {
+    type, cni_number, whatsapp, address, bio,
+    // ✅ V12 KYC : photos identité (obligatoires)
+    cni_recto_url, cni_verso_url, selfie_url,
+    // ✅ V12 KYC : permis (optionnel — requis si pub voiture/chauffeur/covoit)
+    license_category, license_obtained, license_recto_url, license_verso_url,
+  } = req.body;
 
   if (!cni_number) return res.status(400).json({ error: 'Numéro CNI requis' });
   if (!whatsapp)   return res.status(400).json({ error: 'WhatsApp requis' });
   if (!address)    return res.status(400).json({ error: 'Adresse requise' });
+
+  // ✅ V12 KYC : photos CNI obligatoires
+  if (!cni_recto_url) return res.status(400).json({ error: 'Photo recto de la pièce d\'identité requise' });
+  if (!selfie_url)    return res.status(400).json({ error: 'Selfie requis pour vérification' });
+
+  // ✅ V12 : si l'user remplit le permis, vérifier cohérence (pas de demi-permis)
+  const hasAnyLicenseField = license_category || license_obtained || license_recto_url || license_verso_url;
+  if (hasAnyLicenseField) {
+    if (!license_category || !license_obtained || !license_recto_url || !license_verso_url) {
+      return res.status(400).json({
+        error: 'Pour ajouter votre permis, tous les champs sont requis : catégorie, date, recto, verso',
+      });
+    }
+  }
 
   console.log(`[Partners] POST /request by ${req.user.email}`);
 
@@ -159,41 +183,48 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
   const { data: existing } = await db.from('partners')
     .select('id, status').eq('user_id', req.user.id).maybeSingle();
 
+  // ═══ Construire le payload ═══
+  const partnerPayload = {
+    type:          type || 'proprietaire',
+    cni_number,
+    whatsapp,
+    address,
+    bio:           bio || '',
+    status:        'pending',
+    rejection_msg: null,
+    // ✅ V12 KYC
+    cni_recto_url,
+    cni_verso_url:    cni_verso_url || null,
+    selfie_url,
+  };
+
+  // ✅ V12 : ajouter permis seulement si fourni (sinon laisser NULL)
+  if (hasAnyLicenseField) {
+    partnerPayload.license_category   = license_category;
+    partnerPayload.license_obtained   = license_obtained;
+    partnerPayload.license_recto_url  = license_recto_url;
+    partnerPayload.license_verso_url  = license_verso_url;
+    partnerPayload.license_verified   = false; // l'admin doit valider
+  }
+
   // ═══ INSERT ou UPDATE dans partners ═══
   let partnerSaveError = null;
 
   if (existing) {
-    // Update existing (pending ou rejected → remettre en pending)
-    const { error } = await db.from('partners').update({
-      type:          type || 'proprietaire',
-      cni_number,
-      whatsapp,
-      address,
-      bio:           bio || '',
-      status:        'pending',
-      rejection_msg: null,
-    }).eq('id', existing.id);
+    const { error } = await db.from('partners').update(partnerPayload).eq('id', existing.id);
     partnerSaveError = error;
     if (error) console.error(`[Partners] UPDATE error: ${error.message}`);
     else       console.log(`[Partners] ✅ UPDATE partner ${existing.id}`);
   } else {
-    // Nouvelle demande
     const { data: inserted, error } = await db.from('partners').insert({
-      user_id:    req.user.id,
-      type:       type || 'proprietaire',
-      cni_number,
-      whatsapp,
-      address,
-      bio:        bio || '',
-      status:     'pending',
+      user_id: req.user.id,
+      ...partnerPayload,
     }).select('id').maybeSingle();
     partnerSaveError = error;
     if (error) console.error(`[Partners] INSERT error: ${error.message}`);
     else       console.log(`[Partners] ✅ INSERT partner ${inserted?.id}`);
   }
 
-  // ⚠️ CRITIQUE : si la sauvegarde partners a échoué, on ARRETE ici
-  // Sinon on aurait users.demande_verified=true sans ligne partners → incohérence
   if (partnerSaveError) {
     return res.status(500).json({
       error:   'Impossible de sauvegarder la demande : ' + partnerSaveError.message,
@@ -202,10 +233,6 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
   }
 
   // ═══ UPDATE user : demande_verified=true seulement ═══
-  // ✅ V10 : Le role NE CHANGE PAS à la soumission.
-  // - Client reste 'client' → apparaît dans admin → "Clients → Partenaires"
-  // - Partner reste 'partner' → apparaît dans admin → "Partenaires en attente"
-  // Le role passe à 'partner' UNIQUEMENT quand l'admin valide (cf admin.js client-promotions/approve)
   const { error: updErr } = await db.from('users')
     .update({ demande_verified: true }).eq('id', req.user.id);
   if (updErr) {
@@ -234,6 +261,34 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
 
   console.log(`[Partners] ✅ DONE - Request submitted by ${req.user.email}`);
   res.json({ message: 'Demande soumise avec succès. Vérification sous 24-48h.' });
+}));
+
+// ✅ V12 : POST /api/partners/license — Ajouter le permis APRÈS soumission (pour user déjà partenaire)
+router.post('/license', authenticate, asyncHandler(async (req, res) => {
+  const { license_category, license_obtained, license_recto_url, license_verso_url } = req.body;
+
+  if (!license_category || !license_obtained || !license_recto_url || !license_verso_url) {
+    return res.status(400).json({
+      error: 'Tous les champs permis requis : catégorie, date, recto, verso',
+    });
+  }
+
+  const { data: partner } = await db.from('partners')
+    .select('id').eq('user_id', req.user.id).maybeSingle();
+  if (!partner) return res.status(404).json({ error: 'Profil partenaire introuvable' });
+
+  const { error } = await db.from('partners').update({
+    license_category,
+    license_obtained,
+    license_recto_url,
+    license_verso_url,
+    license_verified: false, // admin doit re-valider
+  }).eq('id', partner.id);
+
+  if (error) return res.status(500).json({ error: error.message });
+
+  console.log(`[Partners] ✅ Permis ajouté/mis à jour par ${req.user.email}`);
+  res.json({ message: 'Permis enregistré. Vérification par notre équipe sous 24-48h.' });
 }));
 
 module.exports = router;

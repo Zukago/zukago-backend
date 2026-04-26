@@ -83,7 +83,7 @@ router.post('/room-type/:id', authenticate,
   })
 );
 
-// ─── POST /api/uploads/document — Document partenaire ────────────────────────
+// ─── POST /api/uploads/document — Document partenaire (legacy : id_document) ─
 router.post('/document', authenticate,
   uploadDocument.single('document'),
   asyncHandler(async (req, res) => {
@@ -94,6 +94,32 @@ router.post('/document', authenticate,
       .eq('user_id', req.user.id);
 
     res.json({ url: req.file.path, message: 'Document uploadé' });
+  })
+);
+
+// ─── POST /api/uploads/partner-doc — V12 KYC : upload document spécifique ────
+// Accepte un type ('cni_recto' | 'cni_verso' | 'selfie' | 'license_recto' | 'license_verso')
+// → uploade vers Cloudinary
+// → retourne l'URL (le frontend l'envoie ensuite avec /partners/request ou /partners/license)
+router.post('/partner-doc', authenticate,
+  uploadDocument.single('document'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Aucun fichier envoyé' });
+
+    const validTypes = ['cni_recto', 'cni_verso', 'selfie', 'license_recto', 'license_verso'];
+    const docType = req.body.type;
+
+    if (!docType || !validTypes.includes(docType)) {
+      return res.status(400).json({ error: `Type invalide. Valeurs acceptées : ${validTypes.join(', ')}` });
+    }
+
+    // Le frontend récupère l'URL et l'envoie ensuite avec submitPartnerRequest
+    // (pas de mise à jour DB ici car la ligne partners n'existe pas forcément encore)
+    res.json({
+      url:  req.file.path,
+      type: docType,
+      message: 'Document uploadé',
+    });
   })
 );
 
