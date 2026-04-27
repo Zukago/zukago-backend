@@ -118,18 +118,22 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
 
 
 // ─── GET /api/listings/:id/availability — Dates occupées
+// 🔧 V13 fix : end_date est le jour de check-out, donc PAS occupé pour la nuit suivante
+//    Convention : booking 4→6 mai bloque les nuits 4 et 5, pas le 6.
+//    Le 6 mai est libre pour un nouveau check-in.
 router.get('/:id/availability', asyncHandler(async (req, res) => {
   const { data: bookings } = await db.from('bookings')
     .select('start_date, end_date')
     .eq('listing_id', req.params.id)
     .in('status', ['confirmed', 'pending']);
 
-  // Construire la liste de toutes les dates occupées
+  // Construire la liste de toutes les dates occupées (du start au end EXCLUS)
   const bookedDates = [];
   (bookings || []).forEach(b => {
     const start = new Date(b.start_date);
     const end   = new Date(b.end_date);
-    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    // ✅ V13 : strict less than — le jour de check-out n'est PAS occupé
+    for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
       bookedDates.push(d.toISOString().split('T')[0]);
     }
   });

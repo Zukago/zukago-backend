@@ -5,6 +5,7 @@ const db = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
 const commissionService = require('../services/commissionService');
+const pricingService    = require('../services/pricingService');   // ✅ V13 : calculs polymorphes
 const statsService      = require('../services/statsService');
 const emailService = require('../services/emailService');
 
@@ -13,17 +14,148 @@ const router = express.Router();
 // ── Générer code de réservation unique
 const generateCode = () => 'ZKG-' + Math.random().toString(36).substring(2, 8).toUpperCase();
 
-// ─── POST /api/bookings — Créer réservation ───────────────────────────────────
-router.post('/', authenticate, [
+// ═══════════════════════════════════════════════════════════════════════════
+// HELPERS V13
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── Construire la requête de conflit selon le type de service
+// ✅ V13 fix : .lt + .gt au lieu de .lte + .gte
+//    → Le jour de check-out d'une résa et le jour de check-in d'une autre
+//    PEUVENT être le même jour (convention hôtelière).
+async function checkOverlap(listing, params) {
+  const { start_date, end_date, room_type_id, seats_booked } = params;
+
+  // Covoit : pas d'overlap dates, mais check seats_available
+  if (listing.type === 'cov') {
+    const seats = Number(seats_booked) || 0;
+    const avail = Number(listing.seats_available);
+    if (!isNaN(avail) && seats > avail) {
+      return { conflict: true, reason: `Plus que ${avail} place(s) disponible(s)` };
+    }
+    return { conflict: false };
+  }
+
+  // Driver en heure/halfday : pas de check overlap (multi-bookings possibles)
+  // À terme on pourra ajouter un check par pickup_time, mais pas pour cette phase
+  if (listing.type === 'driver' && !start_date) {
+    return { conflict: false };
+  }
+
+  // Apt / Hotel / Car / Driver-jour : check overlap dates avec inégalités strictes
+  let query = db.from('bookings')
+    .select('id, room_type_id')
+    .eq('listing_id', listing.id)
+    .in('status', ['confirmed', 'pending'])
+    .lt('start_date', end_date)   // ✅ V13 : strict less (pas <=)
+    .gt('end_date', start_date);  // ✅ V13 : strict greater (pas >=)
+
+  const { data: conflicts } = await query;
+
+  // Pour hôtel : ne bloquer que si MÊME chambre déjà occupée
+  if (listing.type === 'hotel' && room_type_id) {
+    const sameRoomConflicts = (conflicts || []).filter(c =>
+      Number(c.room_type_id) === Number(room_type_id)
+    );
+    if (sameRoomConflicts.length) {
+      return { conflict: true, reason: 'Cette chambre n\'est pas disponible sur ces dates' };
+    }
+    return { conflict: false };
+  }
+
+  if (conflicts?.length) {
+    return { conflict: true, reason: 'Ces dates ne sont pas disponibles' };
+  }
+  return { conflict: false };
+}
+
+// ── Validation min nights/units selon le type
+function validateMinUnits(listing, params, calc) {
+  const minNights = Number(listing.min_nights) || 1;
+
+  if (listing.type === 'apt' || listing.type === 'hotel') {
+    if ((calc.unit_count || 0) < minNights) {
+      return `Séjour minimum : ${minNights} nuit(s)`;
+    }
+  } else if (listing.type === 'car') {
+    // Pour voiture : utilise min_nights comme min_days
+    if ((calc.unit_count || 0) < minNights) {
+      return `Location minimum : ${minNights} jour(s)`;
+    }
+  } else if (listing.type === 'driver') {
+    // Pour chauffeur : minimum 1 unité (heure/halfday/jour)
+    if ((calc.unit_count || 0) < 1) {
+      return 'Au moins 1 unité requise';
+    }
+  } else if (listing.type === 'cov') {
+    // Pour covoit : minimum 1 place
+    if ((calc.unit_count || 0) < 1) {
+      return 'Au moins 1 place requise';
+    }
+  }
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POST /api/bookings/quote — Preview prix sans rien enregistrer (V13)
+// ═══════════════════════════════════════════════════════════════════════════
+// Utilisé par le frontend pour afficher le détail prix en temps réel
+// quand le client modifie ses paramètres (avec/sans chauffeur, zone, etc.)
+router.post('/quote', authenticate, [
   body('listing_id').isUUID(),
-  body('start_date').isDate(),
-  body('end_date').isDate(),
-  body('payment_method').optional().isString(),
 ], asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
-  const { listing_id, start_date, end_date, payment_method, notes } = req.body;
+  const { listing_id } = req.body;
+
+  // Récupérer le listing
+  const { data: listing } = await db.from('listings')
+    .select('*, partners(id, user_id)')
+    .eq('id', listing_id)
+    .eq('status', 'active')
+    .single();
+
+  if (!listing) return res.status(404).json({ error: 'Annonce introuvable ou inactive' });
+
+  // Calcul prix via pricingService
+  let calc;
+  try {
+    // Inject partner_id pour que pricingService trouve un éventuel taux custom
+    const listingWithPartner = { ...listing, partner_id: listing.partners?.id };
+    calc = await pricingService.calculate(listingWithPartner, req.body);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
+  }
+
+  res.json({ quote: calc });
+}));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// POST /api/bookings — Créer réservation (V13 polymorphe)
+// ═══════════════════════════════════════════════════════════════════════════
+router.post('/', authenticate, [
+  body('listing_id').isUUID(),
+  body('start_date').optional().isDate(),         // ✅ V13 : optionnel pour cov/driver
+  body('end_date').optional().isDate(),
+  body('payment_method').optional().isString(),
+  body('room_type_id').optional().isInt({ min: 1 }),         // hôtel
+  body('seats_booked').optional().isInt({ min: 1, max: 8 }), // covoit
+  body('unit_type').optional().isString(),                    // driver
+  body('unit_count').optional().isInt({ min: 1 }),
+  body('with_driver').optional().isBoolean(),                 // car
+  body('zone').optional().isString(),
+  body('extras').optional().isObject(),
+  body('pickup_time').optional().isString(),
+  body('pickup_location').optional().isString(),
+], asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  const {
+    listing_id, start_date, end_date, payment_method, notes,
+    room_type_id, seats_booked, unit_type, unit_count,
+    with_driver, zone, extras, pickup_time, pickup_location,
+  } = req.body;
 
   // Récupérer l'annonce
   const { data: listing } = await db.from('listings')
@@ -34,63 +166,45 @@ router.post('/', authenticate, [
 
   if (!listing) return res.status(404).json({ error: 'Annonce introuvable ou inactive' });
 
-  // Calculer le nombre de nuits/jours
-  const start  = new Date(start_date);
-  const end    = new Date(end_date);
-  const nights = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
-
-  if (nights <= 0) return res.status(400).json({ error: 'Dates invalides' });
-  if (nights < (listing.min_nights || 1)) {
-    return res.status(400).json({ error: `Séjour minimum : ${listing.min_nights} nuit(s)` });
-  }
-
-  // Vérifier disponibilité — overlap correct :
-  // booking existant chevauche si : son start <= notre end ET son end >= notre start
-  const { data: conflicts } = await db.from('bookings')
-    .select('id')
-    .eq('listing_id', listing_id)
-    .in('status', ['confirmed', 'pending'])
-    .lte('start_date', end_date)   // booking commence avant ou le jour du départ
-    .gte('end_date', start_date);  // booking finit après ou le jour d'arrivée
-
-  if (conflicts?.length) {
-    return res.status(409).json({ error: 'Ces dates ne sont pas disponibles' });
-  }
-
-  // ── Calculer commission (§3.7 : taux vient de la DB)
+  // ── Calcul prix via pricingService (V13)
   let calc;
   try {
-    calc = await commissionService.calculate(
-      Number(listing.price),
-      nights,
-      listing.partners?.id
-    );
-  } catch(e) {
-    console.log('Commission calc error:', e.message);
-    // Fallback si commissionService plante
-    const rate = 17;
-    const subtotal = Number(listing.price) * nights;
-    calc = {
-      pricePerNight: Number(listing.price),
-      nights,
-      subtotal,
-      serviceFee: Math.round(subtotal * 0.05),
-      total: Math.round(subtotal * 1.05),
-      commission: Math.round(subtotal * rate / 100),
-      commissionRate: rate,
-      partnerGets: Math.round(subtotal * (1 - rate / 100)),
-    };
+    const listingWithPartner = { ...listing, partner_id: listing.partners?.id };
+    calc = await pricingService.calculate(listingWithPartner, req.body);
+  } catch (e) {
+    return res.status(400).json({ error: e.message });
   }
 
-  // Créer la réservation
-  const { data: booking, error } = await db.from('bookings').insert({
+  // ── Validation min units selon le type
+  const minError = validateMinUnits(listing, req.body, calc);
+  if (minError) return res.status(400).json({ error: minError });
+
+  // ── Vérifier disponibilité (V13 fix : .lt/.gt + room_type pour hôtel + seats pour cov)
+  const overlap = await checkOverlap(listing, req.body);
+  if (overlap.conflict) {
+    return res.status(409).json({ error: overlap.reason });
+  }
+
+  // ── Calcul nights pour compat retro (si dates fournies)
+  let nights = 0;
+  if (start_date && end_date) {
+    const start = new Date(start_date);
+    const end   = new Date(end_date);
+    nights = Math.ceil((end - start) / (1000 * 60 * 60 * 24));
+    if (nights <= 0 && (listing.type === 'apt' || listing.type === 'hotel' || listing.type === 'car')) {
+      return res.status(400).json({ error: 'Dates invalides' });
+    }
+  }
+
+  // ── Construire l'objet à insérer
+  const insertData = {
     code:            generateCode(),
     user_id:         req.user.id,
     listing_id,
-    start_date,
-    end_date,
-    nights,
-    price_per_night: calc.pricePerNight,
+    start_date:      start_date || null,
+    end_date:        end_date || null,
+    nights:          nights || calc.unit_count || 1,
+    price_per_night: Math.round(calc.subtotal / (calc.unit_count || 1)),
     subtotal:        calc.subtotal,
     service_fee:     calc.serviceFee,
     total:           calc.total,
@@ -99,11 +213,33 @@ router.post('/', authenticate, [
     status:          'pending',
     payment_method:  payment_method || 'pending',
     notes:           notes || '',
-  }).select().single();
+    // ✅ V13 : nouvelles colonnes polymorphes
+    room_type_id:    room_type_id    || null,
+    seats_booked:    seats_booked    || null,
+    unit_type:       calc.unit_type  || null,
+    unit_count:      calc.unit_count || null,
+    with_driver:     with_driver != null ? !!with_driver : null,
+    zone:            zone            || null,
+    pickup_time:     pickup_time     || null,
+    pickup_location: pickup_location || null,
+    extras:          extras          || null,
+  };
+
+  const { data: booking, error } = await db.from('bookings').insert(insertData).select().single();
 
   if (error) {
     console.log('Booking insert error:', error.message, error.details);
     throw new Error(error.message);
+  }
+
+  // ── Pour covoit : décrémenter seats_available (atomique-ish)
+  if (listing.type === 'cov' && seats_booked) {
+    try {
+      const newSeats = (Number(listing.seats_available) || 0) - Number(seats_booked);
+      await db.from('listings')
+        .update({ seats_available: Math.max(0, newSeats) })
+        .eq('id', listing_id);
+    } catch (e) { console.log('Seats decrement error:', e.message); }
   }
 
   // Enregistrer commission et notifier (non bloquant)
@@ -114,12 +250,12 @@ router.post('/', authenticate, [
   // Mettre à jour stats_daily (non bloquant)
   statsService.updateDay();
 
-  // Notification au partenaire dans l'app
+  // ── Notification au partenaire (V13 : sans emoji UI)
   try {
     await db.from('notifications').insert({
       user_id: listing.partners?.user_id,
-      title: '📋 Nouvelle réservation !',
-      body: `${req.user.name || 'Un client'} a réservé "${listing.title}" du ${start_date} au ${end_date}`,
+      title: 'Nouvelle réservation',
+      body: `${req.user.name || 'Un client'} a réservé "${listing.title}"${start_date ? ` du ${start_date} au ${end_date}` : ''}`,
       type: 'booking',
     });
   } catch(e) { console.log('Notif error:', e.message); }
@@ -143,6 +279,7 @@ router.post('/', authenticate, [
       amount: calc.commission,
       partnerGets: calc.partnerGets,
     },
+    breakdown: calc.breakdown, // ✅ V13 : détail pour affichage frontend
     message: 'Réservation créée. Procédez au paiement.',
   });
 }));
@@ -207,6 +344,19 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
   if (booking.status === 'completed') return res.status(400).json({ error: 'Réservation déjà terminée' });
 
   await db.from('bookings').update({ status: 'cancelled' }).eq('id', req.params.id);
+
+  // ── V13 : pour covoit, restituer les places
+  if (booking.seats_booked && booking.listing_id) {
+    try {
+      const { data: l } = await db.from('listings').select('seats_available, type').eq('id', booking.listing_id).single();
+      if (l && l.type === 'cov') {
+        await db.from('listings')
+          .update({ seats_available: (Number(l.seats_available) || 0) + Number(booking.seats_booked) })
+          .eq('id', booking.listing_id);
+      }
+    } catch (e) { console.log('Seats restore error:', e.message); }
+  }
+
   res.json({ message: 'Réservation annulée' });
 }));
 
@@ -221,11 +371,11 @@ router.patch('/:id/confirm-partner', authenticate, asyncHandler(async (req, res)
 
   await db.from('bookings').update({ status: 'confirmed' }).eq('id', req.params.id);
 
-  // Notifier le client
+  // Notifier le client (V13 : sans emoji UI)
   try {
     await db.from('notifications').insert({
       user_id: booking.user_id,
-      title: '✅ Réservation confirmée !',
+      title: 'Réservation confirmée',
       body: `Votre réservation a été confirmée par le propriétaire.`,
       type: 'booking',
     });
@@ -237,17 +387,29 @@ router.patch('/:id/confirm-partner', authenticate, asyncHandler(async (req, res)
 // ─── PATCH /api/bookings/:id/cancel — Annuler réservation
 router.patch('/:id/cancel', authenticate, asyncHandler(async (req, res) => {
   const { reason } = req.body;
-  const { data: booking } = await db.from('bookings').select('user_id').eq('id', req.params.id).single();
+  const { data: booking } = await db.from('bookings').select('user_id, seats_booked, listing_id').eq('id', req.params.id).single();
 
   if (!booking) return res.status(404).json({ error: 'Réservation introuvable' });
 
   await db.from('bookings').update({ status: 'cancelled' }).eq('id', req.params.id);
 
-  // Notifier le client
+  // ── V13 : pour covoit, restituer les places
+  if (booking.seats_booked && booking.listing_id) {
+    try {
+      const { data: l } = await db.from('listings').select('seats_available, type').eq('id', booking.listing_id).single();
+      if (l && l.type === 'cov') {
+        await db.from('listings')
+          .update({ seats_available: (Number(l.seats_available) || 0) + Number(booking.seats_booked) })
+          .eq('id', booking.listing_id);
+      }
+    } catch (e) { console.log('Seats restore error:', e.message); }
+  }
+
+  // Notifier le client (V13 : sans emoji UI)
   try {
     await db.from('notifications').insert({
       user_id: booking.user_id,
-      title: '❌ Réservation annulée',
+      title: 'Réservation annulée',
       body: reason ? `Raison: ${reason}` : 'Votre réservation a été annulée.',
       type: 'info',
     });

@@ -20,7 +20,7 @@ class CommissionService {
     const { data: config } = await db.from('app_config')
       .select('value').eq('key', 'commission_rate').single();
 
-    return Number(config?.value || 17);
+    return Number(config?.value || 16); // Fallback aligné sur la valeur par défaut Admin (V13)
   }
 
   // ── Calculer les montants d'une réservation
