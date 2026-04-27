@@ -53,27 +53,68 @@ router.get('/', optionalAuth, asyncHandler(async (req, res) => {
 }));
 
 // ─── GET /api/listings/:id — Détail ──────────────────────────────────────────
+// 🔧 V13.5 fix : faire les JOINs séparément pour éviter qu'un sous-select cassé fasse échouer toute la requête.
+//    Avant : un seul gros .select avec 4 JOINs imbriqués → si un échoue, 404 "Annonce introuvable"
+//    Après : query principale simple + sous-queries séparées avec fallback à []
 router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
+  // 1) Query principale ULTRA-SIMPLE (juste le listing) — ne peut pas échouer pour cause de JOIN
   const { data: listing, error } = await db.from('listings')
-    .select(`
-      *,
-      listing_photos(url, public_id, is_main, sort_order),
-      listing_amenities(amenity_code, amenities(label, emoji, category)),
-      reviews(id, rating, comment, verified, created_at, users(name, avatar)),
-      partners(id, user_id, users(name, avatar, verified))
-    `)
+    .select('*')
     .eq('id', req.params.id)
     .eq('status', 'active')
     .single();
 
-  if (error || !listing) return res.status(404).json({ error: 'Annonce introuvable' });
+  if (error || !listing) {
+    console.log('[GET /:id] Listing not found:', req.params.id, error?.message);
+    return res.status(404).json({ error: 'Annonce introuvable' });
+  }
+
+  // 2) Photos (séparé, fallback [])
+  let listing_photos = [];
+  try {
+    const { data: photos } = await db.from('listing_photos')
+      .select('url, public_id, is_main, sort_order')
+      .eq('listing_id', listing.id)
+      .order('sort_order', { ascending: true });
+    listing_photos = photos || [];
+  } catch (e) { console.log('[GET /:id] photos error:', e.message); }
+
+  // 3) Amenities (séparé, avec JOIN sur amenities)
+  let listing_amenities = [];
+  try {
+    const { data: amenities } = await db.from('listing_amenities')
+      .select('amenity_code, amenities(label, emoji, category)')
+      .eq('listing_id', listing.id);
+    listing_amenities = amenities || [];
+  } catch (e) { console.log('[GET /:id] amenities error:', e.message); }
+
+  // 4) Reviews (séparé, avec users)
+  let reviews = [];
+  try {
+    const { data: revs } = await db.from('reviews')
+      .select('id, rating, comment, verified, created_at, users(name, avatar)')
+      .eq('listing_id', listing.id);
+    reviews = revs || [];
+  } catch (e) { console.log('[GET /:id] reviews error:', e.message); }
+
+  // 5) Partner info (séparé, avec users)
+  let partners = null;
+  try {
+    if (listing.partner_id) {
+      const { data: p } = await db.from('partners')
+        .select('id, user_id, users(name, avatar, verified)')
+        .eq('id', listing.partner_id)
+        .single();
+      partners = p || null;
+    }
+  } catch (e) { console.log('[GET /:id] partner error:', e.message); }
 
   // Incrémenter vues
   await db.from('listings').update({ views: (listing.views || 0) + 1 }).eq('id', listing.id);
 
   // Calculer note
-  const rating = listing.reviews?.length
-    ? (listing.reviews.reduce((sum, r) => sum + r.rating, 0) / listing.reviews.length).toFixed(1)
+  const rating = reviews.length
+    ? (reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length).toFixed(1)
     : null;
 
   // Vérifier si favori (si connecté)
@@ -120,10 +161,14 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
   res.json({
     listing: {
       ...listing,
+      listing_photos,
+      listing_amenities,
+      reviews,
+      partners,
       // ✅ V13.5 : pour covoit, override avec la valeur dynamique (source de vérité)
       seats_available: seatsAvailableDynamic,
       rating,
-      reviews_count: listing.reviews?.length,
+      reviews_count: reviews.length,
       isFavorite,
       room_types: roomTypes,
       cancel_policy_details: cancelPolicyDetails,
@@ -136,34 +181,20 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
 // 🔧 V13 fix : end_date est le jour de check-out, donc PAS occupé pour la nuit suivante
 //    Convention : booking 4→6 mai bloque les nuits 4 et 5, pas le 6.
 //    Le 6 mai est libre pour un nouveau check-in.
-// 🔧 V13.5 fix timezone : forcer UTC strict pour éviter décalage d'1 jour
 router.get('/:id/availability', asyncHandler(async (req, res) => {
   const { data: bookings } = await db.from('bookings')
     .select('start_date, end_date')
     .eq('listing_id', req.params.id)
     .in('status', ['confirmed', 'pending']);
 
-  // ✅ V13.5 : opération string-only pour éviter tout problème de timezone
-  // On extrait juste "YYYY-MM-DD" des dates et on incrémente jour par jour en UTC strict
+  // Construire la liste de toutes les dates occupées (du start au end EXCLUS)
   const bookedDates = [];
   (bookings || []).forEach(b => {
-    // Normaliser : ne garder que "YYYY-MM-DD" peu importe le format renvoyé par Supabase
-    const startStr = String(b.start_date).slice(0, 10);
-    const endStr   = String(b.end_date).slice(0, 10);
-
-    // Construire les dates en UTC explicite via Date.UTC (zéro ambiguïté timezone)
-    const [sy, sm, sd] = startStr.split('-').map(Number);
-    const [ey, em, ed] = endStr.split('-').map(Number);
-    const startMs = Date.UTC(sy, sm - 1, sd);
-    const endMs   = Date.UTC(ey, em - 1, ed);
-
-    // Boucle strict less : le jour de check-out n'est PAS occupé
-    for (let ms = startMs; ms < endMs; ms += 86400000) {  // +24h en ms
-      const d = new Date(ms);
-      const yyyy = d.getUTCFullYear();
-      const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
-      const dd   = String(d.getUTCDate()).padStart(2, '0');
-      bookedDates.push(`${yyyy}-${mm}-${dd}`);
+    const start = new Date(b.start_date);
+    const end   = new Date(b.end_date);
+    // ✅ V13 : strict less than — le jour de check-out n'est PAS occupé
+    for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
+      bookedDates.push(d.toISOString().split('T')[0]);
     }
   });
 
