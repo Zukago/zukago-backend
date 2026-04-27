@@ -8,11 +8,14 @@ const logger     = require('./config/logger');
 
 const app = express();
 
+// ✅ V12 : Railway met un proxy (Cloudflare) devant l'app — nécessaire pour rate-limit + uploads
+app.set('trust proxy', 1);
+
 // ─── MIDDLEWARE GLOBAL ────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors({ origin: process.env.FRONTEND_URL || '*', credentials: true }));
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Rate limiting
 const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: 'Trop de requêtes' });
@@ -37,7 +40,7 @@ app.use('/api/reviews',       require('./routes/reviews'));
 app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/uploads',       require('./routes/uploads'));
 app.use('/api/places',        require('./routes/places'));
-// ❌ V10 : route carpool supprimée — tout passe par /api/listings avec type='cov'
+app.use('/api/carpool',       require('./routes/carpool'));   // ✅ V9 : covoiturage
 
 // Health check
 app.get('/health', (req, res) => {
