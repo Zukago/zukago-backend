@@ -136,20 +136,34 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
 // 🔧 V13 fix : end_date est le jour de check-out, donc PAS occupé pour la nuit suivante
 //    Convention : booking 4→6 mai bloque les nuits 4 et 5, pas le 6.
 //    Le 6 mai est libre pour un nouveau check-in.
+// 🔧 V13.5 fix timezone : forcer UTC strict pour éviter décalage d'1 jour
 router.get('/:id/availability', asyncHandler(async (req, res) => {
   const { data: bookings } = await db.from('bookings')
     .select('start_date, end_date')
     .eq('listing_id', req.params.id)
     .in('status', ['confirmed', 'pending']);
 
-  // Construire la liste de toutes les dates occupées (du start au end EXCLUS)
+  // ✅ V13.5 : opération string-only pour éviter tout problème de timezone
+  // On extrait juste "YYYY-MM-DD" des dates et on incrémente jour par jour en UTC strict
   const bookedDates = [];
   (bookings || []).forEach(b => {
-    const start = new Date(b.start_date);
-    const end   = new Date(b.end_date);
-    // ✅ V13 : strict less than — le jour de check-out n'est PAS occupé
-    for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
-      bookedDates.push(d.toISOString().split('T')[0]);
+    // Normaliser : ne garder que "YYYY-MM-DD" peu importe le format renvoyé par Supabase
+    const startStr = String(b.start_date).slice(0, 10);
+    const endStr   = String(b.end_date).slice(0, 10);
+
+    // Construire les dates en UTC explicite via Date.UTC (zéro ambiguïté timezone)
+    const [sy, sm, sd] = startStr.split('-').map(Number);
+    const [ey, em, ed] = endStr.split('-').map(Number);
+    const startMs = Date.UTC(sy, sm - 1, sd);
+    const endMs   = Date.UTC(ey, em - 1, ed);
+
+    // Boucle strict less : le jour de check-out n'est PAS occupé
+    for (let ms = startMs; ms < endMs; ms += 86400000) {  // +24h en ms
+      const d = new Date(ms);
+      const yyyy = d.getUTCFullYear();
+      const mm   = String(d.getUTCMonth() + 1).padStart(2, '0');
+      const dd   = String(d.getUTCDate()).padStart(2, '0');
+      bookedDates.push(`${yyyy}-${mm}-${dd}`);
     }
   });
 
