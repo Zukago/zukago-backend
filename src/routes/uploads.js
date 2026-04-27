@@ -7,24 +7,14 @@ const { uploadListing, uploadDocument, deleteImage } = require('../config/cloudi
 const router = express.Router();
 
 // Types MIME autorisés pour les photos
-const ALLOWED_MIME_TYPES = [
-  'image/jpeg', 'image/jpg', 'image/png', 'image/webp',
-  'image/heic', 'image/heif',
-  'application/octet-stream', // ✅ V12 : iOS envoie parfois ce mimetype pour les photos
-];
+const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/heic', 'image/heif'];
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
 // Middleware validation photos
 const validatePhotos = (req, res, next) => {
   if (!req.files?.length) return next();
   for (const file of req.files) {
-    // ✅ V12 : tolérance — si octet-stream, vérifier l'extension
-    if (file.mimetype === 'application/octet-stream') {
-      const ext = (file.originalname || '').split('.').pop()?.toLowerCase();
-      if (!['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'].includes(ext)) {
-        return res.status(400).json({ error: `Type de fichier non autorise: ${file.originalname}` });
-      }
-    } else if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+    if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
       return res.status(400).json({ error: `Type de fichier non autorise: ${file.mimetype}. Utilisez JPG, PNG ou WebP.` });
     }
     if (file.size > MAX_FILE_SIZE) {
@@ -36,7 +26,7 @@ const validatePhotos = (req, res, next) => {
 
 // ─── POST /api/uploads/listing/:id — Photos d'une annonce ────────────────────
 router.post('/listing/:id', authenticate,
-  uploadListing.array('photos', 15),
+  uploadListing.array('photos', 10),
   validatePhotos,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
@@ -69,41 +59,31 @@ router.delete('/photo/:id', authenticate, asyncHandler(async (req, res) => {
 
 // ─── POST /api/uploads/room-type/:id — Photos d'un type de chambre (V11 Sprint B) ───
 router.post('/room-type/:id', authenticate,
-  uploadListing.array('photos', 15),
+  uploadListing.array('photos', 5),
   validatePhotos,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
-    console.log(`[upload room-type] id=${id} files=${req.files?.length || 0}`);
     if (!req.files?.length) return res.status(400).json({ error: 'Aucune photo envoyée' });
 
-    // Récupérer les URLs Cloudinary
+    // Récupérer les URLs
     const newUrls = req.files.map(file => file.path);
-    console.log(`[upload room-type] ${id} new URLs:`, newUrls);
 
     // Fusionner avec les photos existantes
-    const { data: existing, error: selectErr } = await db.from('listing_room_types')
+    const { data: existing } = await db.from('listing_room_types')
       .select('photos').eq('id', id).single();
-    if (selectErr) {
-      console.error(`[upload room-type] select error:`, selectErr);
-      return res.status(404).json({ error: 'Type de chambre introuvable' });
-    }
     const merged = [...(existing?.photos || []), ...newUrls];
 
     const { data: updated, error } = await db.from('listing_room_types')
       .update({ photos: merged, updated_at: new Date().toISOString() })
       .eq('id', id)
       .select().single();
-    if (error) {
-      console.error(`[upload room-type] update error:`, error);
-      throw new Error(error.message);
-    }
+    if (error) throw new Error(error.message);
 
-    console.log(`[upload room-type] ${id} success, total photos:`, merged.length);
     res.status(201).json({ room_type: updated, photos: newUrls, message: `${newUrls.length} photo(s) uploadée(s)` });
   })
 );
 
-// ─── POST /api/uploads/document — Document partenaire ────────────────────────
+// ─── POST /api/uploads/document — Document partenaire (legacy : id_document) ─
 router.post('/document', authenticate,
   uploadDocument.single('document'),
   asyncHandler(async (req, res) => {
@@ -114,6 +94,32 @@ router.post('/document', authenticate,
       .eq('user_id', req.user.id);
 
     res.json({ url: req.file.path, message: 'Document uploadé' });
+  })
+);
+
+// ─── POST /api/uploads/partner-doc — V12 KYC : upload document spécifique ────
+// Accepte un type ('cni_recto' | 'cni_verso' | 'selfie' | 'license_recto' | 'license_verso')
+// → uploade vers Cloudinary
+// → retourne l'URL (le frontend l'envoie ensuite avec /partners/request ou /partners/license)
+router.post('/partner-doc', authenticate,
+  uploadDocument.single('document'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Aucun fichier envoyé' });
+
+    const validTypes = ['cni_recto', 'cni_verso', 'selfie', 'license_recto', 'license_verso'];
+    const docType = req.body.type;
+
+    if (!docType || !validTypes.includes(docType)) {
+      return res.status(400).json({ error: `Type invalide. Valeurs acceptées : ${validTypes.join(', ')}` });
+    }
+
+    // Le frontend récupère l'URL et l'envoie ensuite avec submitPartnerRequest
+    // (pas de mise à jour DB ici car la ligne partners n'existe pas forcément encore)
+    res.json({
+      url:  req.file.path,
+      type: docType,
+      message: 'Document uploadé',
+    });
   })
 );
 
