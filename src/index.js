@@ -17,8 +17,18 @@ app.use(cors({ origin: process.env.FRONTEND_URL || '*', credentials: true }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Rate limiting
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100, message: 'Trop de requêtes' });
+// Rate limiting — V12 : augmenté pour usage normal app mobile (beaucoup de GET)
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 1000,                         // ✅ V12 : 1000 req / 15min (au lieu de 100)
+  message: 'Trop de requêtes',
+  standardHeaders: true,
+  legacyHeaders: false,
+  // ✅ V12 : skip les routes lourdes/fréquentes pour ne pas les compter
+  skip: (req) => {
+    return req.path === '/api/config/app' || req.path === '/api/auth/me';
+  },
+});
 app.use('/api/', limiter);
 
 // Logger requêtes
