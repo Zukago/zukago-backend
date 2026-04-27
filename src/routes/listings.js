@@ -462,15 +462,20 @@ router.post('/', authenticate, requirePartner, [
 
 // ─── PATCH /api/listings/:id — Modifier annonce ───────────────────────────────
 router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
-  const { data: listing } = await db.from('listings').select('partner_id, partners(user_id)').eq('id', req.params.id).single();
+  const { data: listing } = await db.from('listings').select('partner_id, partners(user_id), type').eq('id', req.params.id).single();
   if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
 
   const isOwner = listing.partners?.user_id === req.user.id;
   const isAdmin = req.user.role === 'admin';
   if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Non autorisé' });
 
-  const { amenities, ...updates } = req.body;
+  // ✅ V12 : extraire les relations qui ne vont pas dans la table listings
+  const { amenities, room_types, listing_photos, listing_room_types, partners, ...updates } = req.body;
   if (!isAdmin) delete updates.status; // partenaire ne peut pas changer le statut
+  // ✅ V12 : champs immuables (sécurité)
+  delete updates.partner_id;
+  delete updates.id;
+  delete updates.created_at;
 
   const { data, error } = await db.from('listings')
     .update({ ...updates, updated_at: new Date() })
@@ -480,12 +485,33 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
   if (error) throw new Error(error.message);
 
   // Mettre à jour équipements si fournis
-  if (amenities) {
+  if (Array.isArray(amenities)) {
     await db.from('listing_amenities').delete().eq('listing_id', req.params.id);
     if (amenities.length) {
       await db.from('listing_amenities').insert(
         amenities.map(code => ({ listing_id: req.params.id, amenity_code: code }))
       );
+    }
+  }
+
+  // ✅ V12 : Mettre à jour types de chambres (hôtel uniquement)
+  if (listing.type === 'hotel' && Array.isArray(room_types)) {
+    // Approche simple : delete + insert (tu peux affiner plus tard avec id-tracking)
+    await db.from('listing_room_types').delete().eq('listing_id', req.params.id);
+    if (room_types.length > 0) {
+      const roomTypesToInsert = room_types.map((rt, idx) => ({
+        listing_id:         req.params.id,
+        name:               rt.name,
+        capacity:           parseInt(rt.capacity, 10) || 1,
+        price_night:        parseInt(rt.price_night, 10),
+        price_weekend:      rt.price_weekend ? parseInt(rt.price_weekend, 10) : null,
+        breakfast_included: !!rt.breakfast_included,
+        quantity:           parseInt(rt.quantity, 10) || 1,
+        photos:             Array.isArray(rt.photos) ? rt.photos : [],
+        sort_order:         idx,
+      }));
+      const { error: rtError } = await db.from('listing_room_types').insert(roomTypesToInsert);
+      if (rtError) console.log('Room types update error:', rtError.message);
     }
   }
 
