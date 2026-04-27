@@ -39,15 +39,41 @@ router.get('/', optionalAuth, asyncHandler(async (req, res) => {
   const { data: listings, error, count } = await q;
   if (error) throw new Error(error.message);
 
+  // ✅ V12 : pour les hôtels, charger aussi les room_types (avec leurs photos) pour HomeScreen
+  const hotelIds = (listings || []).filter(l => l.type === 'hotel').map(l => l.id);
+  let roomTypesByListing = {};
+  if (hotelIds.length > 0) {
+    const { data: rooms } = await db.from('listing_room_types')
+      .select('listing_id, photos')
+      .in('listing_id', hotelIds);
+    (rooms || []).forEach(r => {
+      if (!roomTypesByListing[r.listing_id]) roomTypesByListing[r.listing_id] = [];
+      if (Array.isArray(r.photos) && r.photos.length > 0) {
+        roomTypesByListing[r.listing_id].push(...r.photos);
+      }
+    });
+  }
+
   // Calculer note moyenne
-  const withRating = listings.map(l => ({
-    ...l,
-    rating: l.reviews?.length
-      ? (l.reviews.reduce((sum, r) => sum + r.rating, 0) / l.reviews.length).toFixed(1)
-      : null,
-    reviews_count: l.reviews?.length || 0,
-    main_photo: l.listing_photos?.find(p => p.is_main)?.url || l.listing_photos?.[0]?.url,
-  }));
+  const withRating = listings.map(l => {
+    // ✅ V12 : pour hôtels, agréger toutes les photos (façade + chambres) dans gallery_photos
+    const facadePhotos = (l.listing_photos || []).map(p => p.url);
+    const roomPhotos   = roomTypesByListing[l.id] || [];
+    const galleryPhotos = l.type === 'hotel'
+      ? [...facadePhotos, ...roomPhotos]
+      : facadePhotos;
+
+    return {
+      ...l,
+      rating: l.reviews?.length
+        ? (l.reviews.reduce((sum, r) => sum + r.rating, 0) / l.reviews.length).toFixed(1)
+        : null,
+      reviews_count: l.reviews?.length || 0,
+      main_photo: l.listing_photos?.find(p => p.is_main)?.url || l.listing_photos?.[0]?.url,
+      // ✅ V12 : galerie complète pour HomeScreen
+      gallery_photos: galleryPhotos,
+    };
+  });
 
   res.json({ listings: withRating, total: count });
 }));
