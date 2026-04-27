@@ -174,8 +174,11 @@ async function calculateHotel(listing, params) {
   const nights = nightsBetween(start_date, end_date);
   if (nights <= 0) throw new Error('Dates invalides');
 
-  const basePrice    = Number(room.price)         || 0;
-  const weekendPrice = Number(room.price_weekend) || 0;
+  // ✅ V13.2 fix : la BDD utilise `price_night` (pas `price`) — wizard StepHotelRoomTypes
+  // Compat retro : on lit aussi room.price au cas où certaines lignes l'auraient
+  const basePrice    = Number(room.price_night ?? room.price)    || 0;
+  const weekendPrice = Number(room.price_weekend)                || 0;
+  const roomName     = room.name || room.label || 'Chambre';
 
   if (basePrice <= 0) {
     throw new Error('Prix de la chambre non défini');
@@ -195,15 +198,15 @@ async function calculateHotel(listing, params) {
   }
 
   const label = weekendCount > 0
-    ? `${room.label || 'Chambre'} : ${nights - weekendCount} nuit(s) base + ${weekendCount} nuit(s) weekend`
-    : `${room.label || 'Chambre'} : ${nights} nuit(s)`;
+    ? `${roomName} : ${nights - weekendCount} nuit(s) base + ${weekendCount} nuit(s) weekend`
+    : `${roomName} : ${nights} nuit(s)`;
 
   return {
     unit_type: 'night',
     unit_count: nights,
     subtotal: dailySum,
     breakdown: [{ label, amount: dailySum }],
-    meta: { room_type_id, room_label: room.label },
+    meta: { room_type_id, room_label: roomName },
   };
 }
 
