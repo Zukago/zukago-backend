@@ -25,18 +25,41 @@ const generateCode = () => 'ZKG-' + Math.random().toString(36).substring(2, 8).t
 async function checkOverlap(listing, params) {
   const { start_date, end_date, room_type_id, seats_booked } = params;
 
-  // Covoit : pas d'overlap dates, mais check seats_available
+  // ✅ V13.5 (Phase 5) Solution pro : pour covoit, calculer seats_available
+  // dynamiquement depuis la table bookings (jamais se fier à la colonne).
   if (listing.type === 'cov') {
-    const seats = Number(seats_booked) || 0;
-    const avail = Number(listing.seats_available);
-    if (!isNaN(avail) && seats > avail) {
-      return { conflict: true, reason: `Plus que ${avail} place(s) disponible(s)` };
+    const seatsRequested = Number(seats_booked) || 0;
+    const seatsTotal     = Number(listing.seats_total) || 0;
+
+    if (seatsTotal <= 0) {
+      return { conflict: true, reason: 'Trajet sans places configurées' };
     }
+
+    // Compter les places déjà réservées (pending + confirmed) pour ce listing
+    const { data: activeBookings } = await db.from('bookings')
+      .select('seats_booked')
+      .eq('listing_id', listing.id)
+      .in('status', ['pending', 'confirmed']);
+
+    const seatsTaken = (activeBookings || [])
+      .reduce((sum, b) => sum + (Number(b.seats_booked) || 0), 0);
+
+    const seatsAvailableNow = Math.max(0, seatsTotal - seatsTaken);
+
+    if (seatsRequested > seatsAvailableNow) {
+      return {
+        conflict: true,
+        reason: seatsAvailableNow === 0
+          ? 'Trajet complet'
+          : `Plus que ${seatsAvailableNow} place(s) disponible(s)`,
+      };
+    }
+
+    // Vérifier qu'on n'a pas déjà une réservation active sur ce trajet
     return { conflict: false };
   }
 
   // Driver en heure/halfday : pas de check overlap (multi-bookings possibles)
-  // À terme on pourra ajouter un check par pickup_time, mais pas pour cette phase
   if (listing.type === 'driver' && !start_date) {
     return { conflict: false };
   }

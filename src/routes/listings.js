@@ -94,6 +94,19 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
     roomTypes = rt || [];
   }
 
+  // ✅ V13.5 (Phase 5) Solution pro : pour covoit, recalculer seats_available
+  // dynamiquement depuis les bookings (source de vérité)
+  let seatsAvailableDynamic = listing.seats_available;
+  if (listing.type === 'cov' && Number(listing.seats_total) > 0) {
+    const { data: activeBookings } = await db.from('bookings')
+      .select('seats_booked')
+      .eq('listing_id', listing.id)
+      .in('status', ['pending', 'confirmed']);
+    const taken = (activeBookings || [])
+      .reduce((sum, b) => sum + (Number(b.seats_booked) || 0), 0);
+    seatsAvailableDynamic = Math.max(0, Number(listing.seats_total) - taken);
+  }
+
   // ✅ V11 : politique d'annulation détaillée (texte client)
   let cancelPolicyDetails = null;
   if (listing.cancel_policy) {
@@ -107,6 +120,8 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
   res.json({
     listing: {
       ...listing,
+      // ✅ V13.5 : pour covoit, override avec la valeur dynamique (source de vérité)
+      seats_available: seatsAvailableDynamic,
       rating,
       reviews_count: listing.reviews?.length,
       isFavorite,
@@ -139,6 +154,37 @@ router.get('/:id/availability', asyncHandler(async (req, res) => {
   });
 
   res.json({ bookedDates: [...new Set(bookedDates)] });
+}));
+
+// ─── GET /api/listings/:id/seats-available — Places restantes (covoit, calcul dynamique)
+// ✅ V13.5 Solution pro : ne lit PAS la colonne, calcule depuis les bookings
+//    (source unique de vérité, zéro risque de surbooking)
+router.get('/:id/seats-available', asyncHandler(async (req, res) => {
+  const { data: listing } = await db.from('listings')
+    .select('seats_total, type').eq('id', req.params.id).single();
+
+  if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
+  if (listing.type !== 'cov') {
+    return res.status(400).json({ error: 'Cet endpoint est réservé aux trajets de covoiturage' });
+  }
+
+  const seatsTotal = Number(listing.seats_total) || 0;
+
+  const { data: activeBookings } = await db.from('bookings')
+    .select('seats_booked')
+    .eq('listing_id', req.params.id)
+    .in('status', ['pending', 'confirmed']);
+
+  const taken = (activeBookings || [])
+    .reduce((sum, b) => sum + (Number(b.seats_booked) || 0), 0);
+
+  const seatsAvailable = Math.max(0, seatsTotal - taken);
+
+  res.json({
+    seats_total:     seatsTotal,
+    seats_available: seatsAvailable,
+    seats_taken:     taken,
+  });
 }));
 
 // ─── POST /api/listings — Créer annonce (partenaire) ─────────────────────────
