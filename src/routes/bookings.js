@@ -135,18 +135,19 @@ router.post('/quote', authenticate, [
 // ═══════════════════════════════════════════════════════════════════════════
 router.post('/', authenticate, [
   body('listing_id').isUUID(),
-  body('start_date').optional().isDate(),         // ✅ V13 : optionnel pour cov/driver
-  body('end_date').optional().isDate(),
-  body('payment_method').optional().isString(),
-  body('room_type_id').optional().isInt({ min: 1 }),         // hôtel
-  body('seats_booked').optional().isInt({ min: 1, max: 8 }), // covoit
-  body('unit_type').optional().isString(),                    // driver
-  body('unit_count').optional().isInt({ min: 1 }),
-  body('with_driver').optional().isBoolean(),                 // car
-  body('zone').optional().isString(),
-  body('extras').optional().isObject(),
-  body('pickup_time').optional().isString(),
-  body('pickup_location').optional().isString(),
+  // ✅ V13.1 : { nullable: true } accepte null en plus de undefined
+  body('start_date').optional({ nullable: true, checkFalsy: true }).isDate(),
+  body('end_date').optional({ nullable: true, checkFalsy: true }).isDate(),
+  body('payment_method').optional({ nullable: true, checkFalsy: true }).isString(),
+  body('room_type_id').optional({ nullable: true, checkFalsy: true }).isInt({ min: 1 }),
+  body('seats_booked').optional({ nullable: true, checkFalsy: true }).isInt({ min: 1, max: 8 }),
+  body('unit_type').optional({ nullable: true, checkFalsy: true }).isString(),
+  body('unit_count').optional({ nullable: true, checkFalsy: true }).isInt({ min: 1 }),
+  body('with_driver').optional({ nullable: true }).isBoolean(),
+  body('zone').optional({ nullable: true, checkFalsy: true }).isString(),
+  body('extras').optional({ nullable: true }).isObject(),
+  body('pickup_time').optional({ nullable: true, checkFalsy: true }).isString(),
+  body('pickup_location').optional({ nullable: true, checkFalsy: true }).isString(),
 ], asyncHandler(async (req, res) => {
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });

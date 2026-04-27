@@ -78,7 +78,9 @@ const r = (n) => Math.round(Number(n) || 0);
 //   2) Calcule chaque palier défini (5nights, week, month) si éligible
 //   3) Prend le MOINS CHER (avantage client)
 function calculateApt(listing, params) {
-  const { start_date, end_date } = params;
+  // ✅ V13.1 : sécuriser params null/undefined
+  const p = params || {};
+  const { start_date, end_date } = p;
   if (!start_date || !end_date) {
     throw new Error('Apt : start_date et end_date requis');
   }
@@ -150,7 +152,9 @@ function calculateApt(listing, params) {
 // params: { start_date, end_date, room_type_id }
 // Logique : prix sur la room_type, jour-par-jour, ignore prix du listing
 async function calculateHotel(listing, params) {
-  const { start_date, end_date, room_type_id } = params;
+  // ✅ V13.1 : sécuriser params null/undefined
+  const p = params || {};
+  const { start_date, end_date, room_type_id } = p;
   if (!start_date || !end_date) {
     throw new Error('Hotel : start_date et end_date requis');
   }
@@ -211,7 +215,9 @@ async function calculateHotel(listing, params) {
 //   3) subtotal = daily × days
 //   4) Si days >= 7 ET long_rental_discount_pct → réduction sur le total
 function calculateCar(listing, params) {
-  const { start_date, end_date, with_driver, zone } = params;
+  // ✅ V13.1 : sécuriser params null/undefined
+  const p = params || {};
+  const { start_date, end_date, with_driver, zone } = p;
   if (!start_date || !end_date) {
     throw new Error('Car : start_date et end_date requis');
   }
@@ -288,7 +294,11 @@ function calculateCar(listing, params) {
 //      - 'day'     → unit_count × price
 //   3) airport_fee s'ajoute TOUJOURS si demandé (même en longdistance)
 function calculateDriver(listing, params) {
-  const { unit_type, unit_count, zone, extras = {} } = params;
+  // ✅ V13.1 fix : default = {} ne couvre que undefined, pas null
+  const unit_type  = params?.unit_type;
+  const unit_count = params?.unit_count;
+  const zone       = params?.zone;
+  const extras     = params?.extras || {}; // gère null ET undefined
 
   const priceDay      = Number(listing.price)              || 0;
   const priceHour     = Number(listing.price_hour)         || 0;
@@ -359,7 +369,9 @@ function calculateDriver(listing, params) {
 // params: { seats_booked }
 // Logique : seats × price (commission spéciale 8% appliquée plus haut)
 function calculateCarpool(listing, params) {
-  const { seats_booked } = params;
+  // ✅ V13.1 : sécuriser params null/undefined
+  const p = params || {};
+  const { seats_booked } = p;
   const seats = Number(seats_booked) || 0;
   const pricePerSeat = Number(listing.price) || 0;
 
