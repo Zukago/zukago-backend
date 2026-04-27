@@ -39,41 +39,15 @@ router.get('/', optionalAuth, asyncHandler(async (req, res) => {
   const { data: listings, error, count } = await q;
   if (error) throw new Error(error.message);
 
-  // ✅ V12 : pour les hôtels, charger aussi les room_types (avec leurs photos) pour HomeScreen
-  const hotelIds = (listings || []).filter(l => l.type === 'hotel').map(l => l.id);
-  let roomTypesByListing = {};
-  if (hotelIds.length > 0) {
-    const { data: rooms } = await db.from('listing_room_types')
-      .select('listing_id, photos')
-      .in('listing_id', hotelIds);
-    (rooms || []).forEach(r => {
-      if (!roomTypesByListing[r.listing_id]) roomTypesByListing[r.listing_id] = [];
-      if (Array.isArray(r.photos) && r.photos.length > 0) {
-        roomTypesByListing[r.listing_id].push(...r.photos);
-      }
-    });
-  }
-
   // Calculer note moyenne
-  const withRating = listings.map(l => {
-    // ✅ V12 : pour hôtels, agréger toutes les photos (façade + chambres) dans gallery_photos
-    const facadePhotos = (l.listing_photos || []).map(p => p.url);
-    const roomPhotos   = roomTypesByListing[l.id] || [];
-    const galleryPhotos = l.type === 'hotel'
-      ? [...facadePhotos, ...roomPhotos]
-      : facadePhotos;
-
-    return {
-      ...l,
-      rating: l.reviews?.length
-        ? (l.reviews.reduce((sum, r) => sum + r.rating, 0) / l.reviews.length).toFixed(1)
-        : null,
-      reviews_count: l.reviews?.length || 0,
-      main_photo: l.listing_photos?.find(p => p.is_main)?.url || l.listing_photos?.[0]?.url,
-      // ✅ V12 : galerie complète pour HomeScreen
-      gallery_photos: galleryPhotos,
-    };
-  });
+  const withRating = listings.map(l => ({
+    ...l,
+    rating: l.reviews?.length
+      ? (l.reviews.reduce((sum, r) => sum + r.rating, 0) / l.reviews.length).toFixed(1)
+      : null,
+    reviews_count: l.reviews?.length || 0,
+    main_photo: l.listing_photos?.find(p => p.is_main)?.url || l.listing_photos?.[0]?.url,
+  }));
 
   res.json({ listings: withRating, total: count });
 }));
@@ -89,18 +63,10 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
       partners(id, user_id, users(name, avatar, verified))
     `)
     .eq('id', req.params.id)
+    .eq('status', 'active')
     .single();
 
   if (error || !listing) return res.status(404).json({ error: 'Annonce introuvable' });
-
-  // ✅ V12 : si annonce non-active, seul le propriétaire ou admin peut la voir
-  if (listing.status !== 'active') {
-    const isOwner = req.user && listing.partners?.user_id === req.user.id;
-    const isAdmin = req.user?.role === 'admin';
-    if (!isOwner && !isAdmin) {
-      return res.status(404).json({ error: 'Annonce introuvable' });
-    }
-  }
 
   // Incrémenter vues
   await db.from('listings').update({ views: (listing.views || 0) + 1 }).eq('id', listing.id);
@@ -496,21 +462,15 @@ router.post('/', authenticate, requirePartner, [
 
 // ─── PATCH /api/listings/:id — Modifier annonce ───────────────────────────────
 router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
-  const { data: listing } = await db.from('listings').select('partner_id, partners(user_id), type').eq('id', req.params.id).single();
+  const { data: listing } = await db.from('listings').select('partner_id, partners(user_id)').eq('id', req.params.id).single();
   if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
 
   const isOwner = listing.partners?.user_id === req.user.id;
   const isAdmin = req.user.role === 'admin';
   if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Non autorisé' });
 
-  // ✅ V12 : extraire les relations qui ne vont pas dans la table listings
-  const { amenities, room_types, listing_photos, listing_room_types, partners, ...updates } = req.body;
+  const { amenities, ...updates } = req.body;
   if (!isAdmin) delete updates.status; // partenaire ne peut pas changer le statut
-  // ✅ V12 : champs immuables (sécurité)
-  delete updates.partner_id;
-  delete updates.id;
-  delete updates.created_at;
-  delete updates.type; // ✅ V12 FIX : le type d'annonce ne doit JAMAIS être modifié par PATCH
 
   const { data, error } = await db.from('listings')
     .update({ ...updates, updated_at: new Date() })
@@ -520,33 +480,12 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
   if (error) throw new Error(error.message);
 
   // Mettre à jour équipements si fournis
-  if (Array.isArray(amenities)) {
+  if (amenities) {
     await db.from('listing_amenities').delete().eq('listing_id', req.params.id);
     if (amenities.length) {
       await db.from('listing_amenities').insert(
         amenities.map(code => ({ listing_id: req.params.id, amenity_code: code }))
       );
-    }
-  }
-
-  // ✅ V12 : Mettre à jour types de chambres (hôtel uniquement)
-  if (listing.type === 'hotel' && Array.isArray(room_types)) {
-    // Approche simple : delete + insert (tu peux affiner plus tard avec id-tracking)
-    await db.from('listing_room_types').delete().eq('listing_id', req.params.id);
-    if (room_types.length > 0) {
-      const roomTypesToInsert = room_types.map((rt, idx) => ({
-        listing_id:         req.params.id,
-        name:               rt.name,
-        capacity:           parseInt(rt.capacity, 10) || 1,
-        price_night:        parseInt(rt.price_night, 10),
-        price_weekend:      rt.price_weekend ? parseInt(rt.price_weekend, 10) : null,
-        breakfast_included: !!rt.breakfast_included,
-        quantity:           parseInt(rt.quantity, 10) || 1,
-        photos:             Array.isArray(rt.photos) ? rt.photos : [],
-        sort_order:         idx,
-      }));
-      const { error: rtError } = await db.from('listing_room_types').insert(roomTypesToInsert);
-      if (rtError) console.log('Room types update error:', rtError.message);
     }
   }
 
