@@ -77,7 +77,14 @@ router.post('/register', registerLimiter, [
   //   - demande_verified passe à true
   //   - admin puisse voir la demande dans le dashboard
 
-  try { await emailService.sendWelcome(user); } catch(e) {}
+  // ✅ V13.5 : envoyer email de VÉRIFICATION (avec lien token), pas juste bienvenue
+  try {
+    await emailService.sendVerification(user, verifyToken);
+    console.log('[Auth Register] Email de vérification envoyé à', user.email);
+  } catch(e) {
+    console.log('[Auth Register] ❌ Erreur envoi email vérification:', e.message);
+    // On continue même si email échoue — l'utilisateur peut redemander plus tard
+  }
 
   const tokens = generateTokens(user.id);
   const refreshExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
@@ -148,6 +155,36 @@ router.get('/verify-email', asyncHandler(async (req, res) => {
   res.json({ message: 'Email verifie avec succes.' });
 }));
 
+// ✅ V13.5 : POST /api/auth/resend-verification — renvoyer email de vérification
+router.post('/resend-verification', authenticate, asyncHandler(async (req, res) => {
+  const { data: user } = await db.from('users')
+    .select('id, name, email, verified')
+    .eq('id', req.user.id)
+    .single();
+
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  if (user.verified) return res.status(400).json({ error: 'Email déjà vérifié' });
+
+  // Générer un nouveau token
+  const verifyToken   = crypto.randomBytes(32).toString('hex');
+  const verifyExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+  await db.from('users').update({
+    verify_token:   verifyToken,
+    verify_expires: verifyExpires,
+  }).eq('id', user.id);
+
+  try {
+    await emailService.sendVerification(user, verifyToken);
+    console.log('[Auth Resend] Email de vérification renvoyé à', user.email);
+  } catch(e) {
+    console.log('[Auth Resend] ❌ Erreur:', e.message);
+    return res.status(500).json({ error: 'Impossible d\'envoyer l\'email pour le moment' });
+  }
+
+  res.json({ message: 'Email de vérification renvoyé' });
+}));
+
 // POST /api/auth/google
 router.post('/google', asyncHandler(async (req, res) => {
   const { googleToken, name, email, avatar } = req.body;
@@ -187,7 +224,13 @@ router.post('/google', asyncHandler(async (req, res) => {
     }).select('id, name, email, role, avatar, verified, demande_verified').single();
     if (error) throw new Error(error.message);
     user = newUser;
-    try { await emailService.sendWelcome(user); } catch(e) {}
+    // ✅ V13.5 : Google login = email déjà vérifié par Google → email de bienvenue (pas de vérification)
+    try {
+      await emailService.sendWelcome(user);
+      console.log('[Auth Google] Email bienvenue envoyé à', user.email);
+    } catch(e) {
+      console.log('[Auth Google] ❌ Erreur envoi email bienvenue:', e.message);
+    }
   } else {
     if (verifiedAvatar && !user.avatar) {
       await db.from('users').update({ avatar: verifiedAvatar }).eq('id', user.id);
