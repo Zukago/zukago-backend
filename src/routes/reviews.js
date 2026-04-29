@@ -17,7 +17,7 @@ const router = express.Router();
 // Limite : 6 avis par service, uniquement visible=true et verified=true
 router.get('/by-service', optionalAuth, asyncHandler(async (req, res) => {
   const { data: rows, error } = await db.from('reviews')
-    .select('id, rating, comment, verified, created_at, users(name, avatar), listings(type, city)')
+    .select('id, rating, comment, verified, created_at, users(name, avatar), listings(type, city_name)')
     .eq('visible', true)
     .eq('verified', true)
     .order('created_at', { ascending: false })
@@ -50,7 +50,8 @@ router.get('/by-service', optionalAuth, asyncHandler(async (req, res) => {
       // Champs aplatis pour le frontend (évite tout objet imbriqué hasardeux)
       name: typeof usersJoin?.name === 'string' ? usersJoin.name : 'Client',
       avatar: typeof usersJoin?.avatar === 'string' ? usersJoin.avatar : null,
-      city: typeof listingsJoin?.city === 'string' ? listingsJoin.city : '',
+      // ✅ FIX V13.5.1 : la colonne s'appelle city_name (pas city) dans la table listings
+      city: typeof listingsJoin?.city_name === 'string' ? listingsJoin.city_name : '',
     });
   });
 
