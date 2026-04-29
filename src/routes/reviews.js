@@ -87,6 +87,25 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   if (!comment || comment.trim().length < 10)
     return res.status(400).json({ error: 'Commentaire trop court (min. 10 caractères)' });
 
+  // ✅ V13.5.5 : récupérer le listing pour gérer le cas covoit (date + conducteur)
+  const { data: listingMeta } = await db.from('listings')
+    .select('type, depart_date, partners(user_id)')
+    .eq('id', listing_id)
+    .single();
+
+  // ✅ V13.5.5 : pour covoit, le trajet doit être passé (depart_date < aujourd'hui)
+  if (listingMeta?.type === 'cov') {
+    if (!listingMeta.depart_date) {
+      return res.status(400).json({ error: 'Trajet sans date de départ.' });
+    }
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    if (String(listingMeta.depart_date).slice(0, 10) >= today) {
+      return res.status(403).json({
+        error: 'Vous pourrez laisser un avis après la date du trajet.'
+      });
+    }
+  }
+
   // Vérifier que l'utilisateur a une réservation confirmée pour cette annonce
   const { data: booking } = await db.from('bookings')
     .select('id')
@@ -102,7 +121,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     });
   }
 
-  // Vérifier qu'il n'a pas déjà laissé un avis
+  // Vérifier qu'il n'a pas déjà laissé un avis (1 avis max par voyage / annonce)
   const { data: existing } = await db.from('reviews')
     .select('id')
     .eq('listing_id', listing_id)
@@ -113,6 +132,12 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     return res.status(409).json({ error: 'Vous avez déjà laissé un avis pour cette annonce.' });
   }
 
+  // ✅ V13.5.5 : pour covoit, l'avis cible aussi le conducteur (target_user_id)
+  // Pour les autres types, target_user_id reste null (l'avis est sur l'annonce)
+  const targetUserIdForReview = (listingMeta?.type === 'cov')
+    ? (listingMeta.partners?.user_id || null)
+    : null;
+
   // Insérer l'avis
   const { data: review, error } = await db.from('reviews').insert({
     listing_id,
@@ -121,6 +146,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     comment:  comment.trim(),
     visible:  true,
     verified: true, // réservation vérifiée ci-dessus
+    target_user_id: targetUserIdForReview,
   }).select('*, users(name, avatar)').single();
 
   if (error) {
@@ -128,7 +154,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
 
-  // Notifier le partenaire
+  // Notifier le partenaire / conducteur
   try {
     const { data: listing } = await db.from('listings')
       .select('title, partners(user_id)')
