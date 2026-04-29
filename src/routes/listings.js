@@ -40,14 +40,20 @@ router.get('/', optionalAuth, asyncHandler(async (req, res) => {
   if (error) throw new Error(error.message);
 
   // Calculer note moyenne
-  const withRating = listings.map(l => ({
-    ...l,
-    rating: l.reviews?.length
-      ? (l.reviews.reduce((sum, r) => sum + r.rating, 0) / l.reviews.length).toFixed(1)
-      : null,
-    reviews_count: l.reviews?.length || 0,
-    main_photo: l.listing_photos?.find(p => p.is_main)?.url || l.listing_photos?.[0]?.url,
-  }));
+  // ✅ V13.5 FIX : on remplace le tableau "reviews" brut par "reviews_count" (nombre)
+  //    pour éviter tout risque "Objects are not valid as a React child" côté frontend
+  const withRating = listings.map(l => {
+    const ratingsArr = Array.isArray(l.reviews) ? l.reviews : [];
+    const { reviews: _drop, ...rest } = l;
+    return {
+      ...rest,
+      rating: ratingsArr.length
+        ? (ratingsArr.reduce((sum, r) => sum + (Number(r?.rating) || 0), 0) / ratingsArr.length).toFixed(1)
+        : null,
+      reviews_count: ratingsArr.length,
+      main_photo: l.listing_photos?.find(p => p.is_main)?.url || l.listing_photos?.[0]?.url,
+    };
+  });
 
   res.json({ listings: withRating, total: count });
 }));
@@ -163,7 +169,9 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
       ...listing,
       listing_photos,
       listing_amenities,
-      reviews,
+      // ✅ V13.5 FIX : ne PAS exposer la clé "reviews" au frontend (crash React child)
+      // Le frontend lit reviews_count pour le nombre, et /api/reviews/listing/:id pour la liste
+      reviews_list: reviews,
       partners,
       // ✅ V13.5 : pour covoit, override avec la valeur dynamique (source de vérité)
       seats_available: seatsAvailableDynamic,

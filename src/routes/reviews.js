@@ -10,6 +10,53 @@ const { asyncHandler }               = require('../middleware/errorHandler');
 
 const router = express.Router();
 
+// ─── GET /api/reviews/by-service — Avis groupés par type d'annonce ──────────
+// V13.5 : permet au HomeScreen d'afficher des avis filtrés selon l'onglet actif
+// Renvoie { apt: [...], hotel: [...], voiture: [...], cha: [...], cov: [...] }
+// Chaque avis est joint à users(name, avatar) et listings(type, city)
+// Limite : 6 avis par service, uniquement visible=true et verified=true
+router.get('/by-service', optionalAuth, asyncHandler(async (req, res) => {
+  const { data: rows, error } = await db.from('reviews')
+    .select('id, rating, comment, verified, created_at, users(name, avatar), listings(type, city)')
+    .eq('visible', true)
+    .eq('verified', true)
+    .order('created_at', { ascending: false })
+    .limit(200);
+
+  if (error) {
+    console.error('[GET /reviews/by-service] error:', error.message);
+    return res.status(500).json({ error: error.message });
+  }
+
+  // Grouper par type d'annonce, max 6 par service
+  const MAX_PER_SERVICE = 6;
+  const grouped = {};
+  (rows || []).forEach(r => {
+    const type = r.listings?.type;
+    if (!type) return;
+    if (!grouped[type]) grouped[type] = [];
+    if (grouped[type].length >= MAX_PER_SERVICE) return;
+
+    // Normaliser users (Supabase renvoie array ou objet selon contexte)
+    const usersJoin = Array.isArray(r.users) ? r.users[0] : r.users;
+    const listingsJoin = Array.isArray(r.listings) ? r.listings[0] : r.listings;
+
+    grouped[type].push({
+      id: r.id,
+      rating: Number(r.rating) || 0,
+      comment: typeof r.comment === 'string' ? r.comment : '',
+      verified: !!r.verified,
+      created_at: r.created_at,
+      // Champs aplatis pour le frontend (évite tout objet imbriqué hasardeux)
+      name: typeof usersJoin?.name === 'string' ? usersJoin.name : 'Client',
+      avatar: typeof usersJoin?.avatar === 'string' ? usersJoin.avatar : null,
+      city: typeof listingsJoin?.city === 'string' ? listingsJoin.city : '',
+    });
+  });
+
+  res.json({ reviewsByService: grouped });
+}));
+
 // ─── GET /api/reviews/listing/:id — Avis d'une annonce ──────────────────────
 router.get('/listing/:id', optionalAuth, asyncHandler(async (req, res) => {
   const { data: reviews, error } = await db.from('reviews')
