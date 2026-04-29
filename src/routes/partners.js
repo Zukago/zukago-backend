@@ -15,6 +15,175 @@ router.get('/me', authenticate, asyncHandler(async (req, res) => {
   res.json({ partner });
 }));
 
+// ─── GET /api/partners/public/:user_id — Profil PUBLIC d'un conducteur ──────
+// V13.5.9 : profil affichable à tous les passagers (BlaBlaCar style)
+// Aucune donnée sensible exposée (CNI, photos, adresse, téléphone)
+// Toutes les stats (note moyenne, nb trajets, nb avis) sont calculées dynamiquement
+router.get('/public/:user_id', asyncHandler(async (req, res) => {
+  const userId = req.params.user_id;
+  if (!userId) return res.status(400).json({ error: 'user_id requis' });
+
+  // 1. Données utilisateur (publiques uniquement)
+  const { data: userRow } = await db.from('users')
+    .select('id, name, avatar, verified, created_at')
+    .eq('id', userId)
+    .maybeSingle();
+
+  if (!userRow) return res.status(404).json({ error: 'Utilisateur introuvable' });
+
+  // 2. Données partenaire (filtrer les sensibles)
+  const { data: partnerRow } = await db.from('partners')
+    .select('id, type, bio, status, license_category, license_obtained, license_verified, cni_recto_url, selfie_url, created_at')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  // Vérifications publiques (sans exposer les URLs des photos sensibles)
+  const verifications = {
+    email:           !!userRow.verified,
+    cni_submitted:   !!(partnerRow?.cni_recto_url),
+    selfie_submitted: !!(partnerRow?.selfie_url),
+    license_verified: !!(partnerRow?.license_verified),
+    partner_active:  partnerRow?.status === 'active',
+  };
+
+  // Année d'obtention du permis + années d'expérience
+  let licenseInfo = null;
+  if (partnerRow?.license_obtained) {
+    const obtainedDate  = new Date(partnerRow.license_obtained);
+    const obtainedYear  = obtainedDate.getFullYear();
+    const yearsExp      = Math.max(0, new Date().getFullYear() - obtainedYear);
+    licenseInfo = {
+      category:         partnerRow.license_category || null,
+      obtained_year:    obtainedYear,
+      years_experience: yearsExp,
+    };
+  }
+
+  // 3. Stats dynamiques : note moyenne + nb avis (via target_user_id pour covoit, fallback partner-listing)
+  let ratingAverage = null;
+  let ratingCount   = 0;
+
+  // 3a. Avis directement liés au conducteur (covoit avec target_user_id)
+  const { data: directReviews } = await db.from('reviews')
+    .select('rating')
+    .eq('target_user_id', userId)
+    .eq('visible', true)
+    .eq('verified', true);
+
+  // 3b. Avis liés aux annonces du partenaire (apt/hotel/car/driver)
+  let partnerReviews = [];
+  if (partnerRow?.id) {
+    const { data: partnerListings } = await db.from('listings')
+      .select('id')
+      .eq('partner_id', partnerRow.id);
+    const listingIds = (partnerListings || []).map(l => l.id);
+
+    if (listingIds.length > 0) {
+      const { data: revs } = await db.from('reviews')
+        .select('rating')
+        .in('listing_id', listingIds)
+        .eq('visible', true)
+        .eq('verified', true)
+        .is('target_user_id', null); // éviter le double comptage avec les avis covoit
+      partnerReviews = revs || [];
+    }
+  }
+
+  const allRatings = [...(directReviews || []), ...partnerReviews].map(r => Number(r.rating)).filter(n => Number.isFinite(n));
+  if (allRatings.length > 0) {
+    ratingCount   = allRatings.length;
+    ratingAverage = Number((allRatings.reduce((s, n) => s + n, 0) / allRatings.length).toFixed(1));
+  }
+
+  // 4. Stats trajets/réservations effectués (bookings confirmed sur listings du partenaire, dont la date est passée)
+  let tripsCompleted = 0;
+  if (partnerRow?.id) {
+    const today = new Date().toISOString().slice(0, 10);
+    const { data: partnerListings } = await db.from('listings')
+      .select('id')
+      .eq('partner_id', partnerRow.id);
+    const listingIds = (partnerListings || []).map(l => l.id);
+
+    if (listingIds.length > 0) {
+      const { count } = await db.from('bookings')
+        .select('id', { count: 'exact', head: true })
+        .in('listing_id', listingIds)
+        .eq('status', 'confirmed')
+        .lt('start_date', today);
+      tripsCompleted = count || 0;
+    }
+  }
+
+  // 5. Récupérer les 5 derniers avis avec les noms des passagers
+  let reviewsList = [];
+  if (partnerRow?.id) {
+    // Construire un OR : reviews avec target_user_id = userId  OU  reviews sur les listings du partenaire
+    const { data: partnerListings } = await db.from('listings')
+      .select('id')
+      .eq('partner_id', partnerRow.id);
+    const listingIds = (partnerListings || []).map(l => l.id);
+
+    // Avis covoit (target_user_id)
+    const { data: revsDirect } = await db.from('reviews')
+      .select('id, rating, comment, created_at, users!reviews_user_id_fkey(name, avatar)')
+      .eq('target_user_id', userId)
+      .eq('visible', true)
+      .eq('verified', true)
+      .order('created_at', { ascending: false })
+      .limit(5);
+
+    // Avis sur listings du partenaire (apt/hotel/car/driver)
+    let revsListings = [];
+    if (listingIds.length > 0) {
+      const { data } = await db.from('reviews')
+        .select('id, rating, comment, created_at, users!reviews_user_id_fkey(name, avatar)')
+        .in('listing_id', listingIds)
+        .eq('visible', true)
+        .eq('verified', true)
+        .is('target_user_id', null)
+        .order('created_at', { ascending: false })
+        .limit(5);
+      revsListings = data || [];
+    }
+
+    // Fusionner et trier par date desc, max 5
+    reviewsList = [...(revsDirect || []), ...revsListings]
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+      .slice(0, 5)
+      .map(r => {
+        const u = Array.isArray(r.users) ? r.users[0] : r.users;
+        return {
+          id:         r.id,
+          rating:     Number(r.rating) || 0,
+          comment:    typeof r.comment === 'string' ? r.comment : '',
+          name:       (u && typeof u.name === 'string') ? u.name : 'Client',
+          avatar:     (u && typeof u.avatar === 'string') ? u.avatar : null,
+          created_at: r.created_at,
+        };
+      });
+  }
+
+  // 6. Réponse finale
+  res.json({
+    partner: {
+      user_id:         userRow.id,
+      name:            userRow.name || 'Conducteur',
+      avatar:          userRow.avatar || null,
+      verified:        !!userRow.verified,
+      member_since:    userRow.created_at || null,
+      bio:             (partnerRow?.bio && typeof partnerRow.bio === 'string') ? partnerRow.bio : '',
+      type:            partnerRow?.type || null,
+      partner_status:  partnerRow?.status || null,
+      rating_average:  ratingAverage,
+      rating_count:    ratingCount,
+      trips_completed: tripsCompleted,
+      verifications,
+      license_info:    licenseInfo,
+    },
+    reviews: reviewsList,
+  });
+}));
+
 // ─── GET /api/partners/stats — Stats du partenaire ───────────────────────────
 router.get('/stats', authenticate, asyncHandler(async (req, res) => {
   const { data: partner } = await db.from('partners').select('id, solde').eq('user_id', req.user.id).maybeSingle();
