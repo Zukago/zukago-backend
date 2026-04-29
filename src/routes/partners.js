@@ -9,7 +9,7 @@ const router = express.Router();
 // ─── GET /api/partners/me — Mon profil partenaire ────────────────────────────
 router.get('/me', authenticate, asyncHandler(async (req, res) => {
   const { data: partner } = await db.from('partners')
-    .select('*, users(name, email, avatar, phone, whatsapp)')
+    .select('*, users!partners_user_id_fkey(name, email, avatar, phone, whatsapp)')
     .eq('user_id', req.user.id).single();
   if (!partner) return res.status(404).json({ error: 'Profil partenaire introuvable' });
   res.json({ partner });
