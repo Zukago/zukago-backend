@@ -63,6 +63,7 @@ router.get('/', optionalAuth, asyncHandler(async (req, res) => {
 //    Avant : un seul gros .select avec 4 JOINs imbriqués → si un échoue, 404 "Annonce introuvable"
 //    Après : query principale simple + sous-queries séparées avec fallback à []
 router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
+  console.log('🔵 [V13.5.11 DEBUG] GET /api/listings/:id route hit, id=', req.params.id);
   // 1) Query principale ULTRA-SIMPLE (juste le listing) — ne peut pas échouer pour cause de JOIN
   const { data: listing, error } = await db.from('listings')
     .select('*')
@@ -71,9 +72,11 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
     .single();
 
   if (error || !listing) {
-    console.log('[GET /:id] Listing not found:', req.params.id, error?.message);
+    console.log('🔴 [V13.5.11 DEBUG] Listing not found:', req.params.id, error?.message);
     return res.status(404).json({ error: 'Annonce introuvable' });
   }
+
+  console.log('🟢 [V13.5.11 DEBUG] Listing found, partner_id=', listing.partner_id);
 
   // 2) Photos (séparé, fallback [])
   let listing_photos = [];
@@ -107,13 +110,21 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
   let partners = null;
   try {
     if (listing.partner_id) {
-      const { data: p } = await db.from('partners')
+      console.log('🔵 [V13.5.11 DEBUG] Fetching partner with id:', listing.partner_id);
+      const { data: p, error: partnerErr } = await db.from('partners')
         .select('id, user_id, users(name, avatar, verified)')
         .eq('id', listing.partner_id)
         .single();
+      if (partnerErr) {
+        console.log('🔴 [V13.5.11 DEBUG] Partner fetch ERROR:', partnerErr.message, partnerErr.details, partnerErr.hint);
+      } else {
+        console.log('🟢 [V13.5.11 DEBUG] Partner fetched:', JSON.stringify(p));
+      }
       partners = p || null;
+    } else {
+      console.log('⚠️ [V13.5.11 DEBUG] No partner_id on listing');
     }
-  } catch (e) { console.log('[GET /:id] partner error:', e.message); }
+  } catch (e) { console.log('🔴 [V13.5.11 DEBUG] Partner catch:', e.message); }
 
   // Incrémenter vues
   await db.from('listings').update({ views: (listing.views || 0) + 1 }).eq('id', listing.id);
