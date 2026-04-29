@@ -64,13 +64,22 @@ async function checkOverlap(listing, params) {
     return { conflict: false };
   }
 
-  // Apt / Hotel / Car / Driver-jour : check overlap dates avec inégalités strictes
+  // Apt / Hotel / Car / Driver-jour : check overlap dates
+  // ✅ V13.5.4 : pour driver, inégalités INCLUSIVES (.lte + .gte) car end_date est presté.
+  //    Apt/hotel/car : inégalités STRICTES (.lt + .gt) car end_date est le jour de check-out (libre).
+  const isDriver = listing.type === 'driver';
   let query = db.from('bookings')
     .select('id, room_type_id')
     .eq('listing_id', listing.id)
-    .in('status', ['confirmed', 'pending'])
-    .lt('start_date', end_date)   // ✅ V13 : strict less (pas <=)
-    .gt('end_date', start_date);  // ✅ V13 : strict greater (pas >=)
+    .in('status', ['confirmed', 'pending']);
+
+  if (isDriver) {
+    // Driver mode 'day' : du start au end inclus → conflit si chevauchement même partiel
+    query = query.lte('start_date', end_date).gte('end_date', start_date);
+  } else {
+    // ✅ V13 : strict — un check-in le jour d'un check-out précédent est OK
+    query = query.lt('start_date', end_date).gt('end_date', start_date);
+  }
 
   const { data: conflicts } = await query;
 

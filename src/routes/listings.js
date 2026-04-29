@@ -186,23 +186,43 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
 
 
 // ─── GET /api/listings/:id/availability — Dates occupées
-// 🔧 V13 fix : end_date est le jour de check-out, donc PAS occupé pour la nuit suivante
+// 🔧 V13 fix : pour apt/hotel/car, end_date est le jour de check-out, donc PAS occupé.
 //    Convention : booking 4→6 mai bloque les nuits 4 et 5, pas le 6.
 //    Le 6 mai est libre pour un nouveau check-in.
+// ✅ V13.5.4 : pour driver mode 'day', end_date EST occupé (dernier jour de prestation).
+//    Convention : prestation chauffeur 5→7 mai bloque 5, 6 ET 7 (3 jours prestés).
 router.get('/:id/availability', asyncHandler(async (req, res) => {
+  // ✅ V13.5.4 : récupérer le type de listing pour adapter la convention
+  const { data: listing } = await db.from('listings')
+    .select('type')
+    .eq('id', req.params.id)
+    .single();
+
+  const isDriver = listing?.type === 'driver';
+
   const { data: bookings } = await db.from('bookings')
     .select('start_date, end_date')
     .eq('listing_id', req.params.id)
     .in('status', ['confirmed', 'pending']);
 
-  // Construire la liste de toutes les dates occupées (du start au end EXCLUS)
+  // Construire la liste de toutes les dates occupées
+  // - apt/hotel/car : du start au end EXCLUS (convention nuits)
+  // - driver       : du start au end INCLUS (convention prestation)
   const bookedDates = [];
   (bookings || []).forEach(b => {
+    if (!b.start_date || !b.end_date) return;
     const start = new Date(b.start_date);
     const end   = new Date(b.end_date);
-    // ✅ V13 : strict less than — le jour de check-out n'est PAS occupé
-    for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
-      bookedDates.push(d.toISOString().split('T')[0]);
+    if (isDriver) {
+      // ✅ V13.5.4 driver : inclusif (<=)
+      for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+        bookedDates.push(d.toISOString().split('T')[0]);
+      }
+    } else {
+      // ✅ V13 apt/hotel/car : strict less than (<) — le jour de check-out n'est PAS occupé
+      for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
+        bookedDates.push(d.toISOString().split('T')[0]);
+      }
     }
   });
 
