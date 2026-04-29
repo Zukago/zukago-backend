@@ -38,12 +38,18 @@ router.get('/public/:user_id', asyncHandler(async (req, res) => {
     .maybeSingle();
 
   // Vérifications publiques (sans exposer les URLs des photos sensibles)
+  // ✅ V13.5.13 : Logique métier ZUKAGO :
+  //   - users.verified = true  → admin a TOUT validé (CNI + selfie + permis OK)
+  //   - users.demande_verified = true → demande soumise, en attente admin
+  // Donc si users.verified = true, toutes les vérifications sont OK car obligatoires
+  // pour publier des annonces.
+  const isFullyVerified = !!userRow.verified;
   const verifications = {
     email:           !!userRow.verified,
-    cni_submitted:   !!(partnerRow?.cni_recto_url),
-    selfie_submitted: !!(partnerRow?.selfie_url),
-    license_verified: !!(partnerRow?.license_verified),
-    partner_active:  partnerRow?.status === 'active',
+    cni_submitted:   isFullyVerified && !!(partnerRow?.cni_recto_url),
+    selfie_submitted: isFullyVerified && !!(partnerRow?.selfie_url),
+    license_verified: isFullyVerified && !!(partnerRow?.license_obtained || partnerRow?.license_verified),
+    partner_active:  isFullyVerified,
   };
 
   // Année d'obtention du permis + années d'expérience
