@@ -17,7 +17,7 @@ const router = express.Router();
 // Limite : 6 avis par service, uniquement visible=true et verified=true
 router.get('/by-service', optionalAuth, asyncHandler(async (req, res) => {
   const { data: rows, error } = await db.from('reviews')
-    .select('id, rating, comment, verified, created_at, users(name, avatar), listings(type, city_name)')
+    .select('id, rating, comment, verified, created_at, users(name, avatar), listings(type)')
     .eq('visible', true)
     .eq('verified', true)
     .order('created_at', { ascending: false })
@@ -39,7 +39,6 @@ router.get('/by-service', optionalAuth, asyncHandler(async (req, res) => {
 
     // Normaliser users (Supabase renvoie array ou objet selon contexte)
     const usersJoin = Array.isArray(r.users) ? r.users[0] : r.users;
-    const listingsJoin = Array.isArray(r.listings) ? r.listings[0] : r.listings;
 
     grouped[type].push({
       id: r.id,
@@ -50,8 +49,9 @@ router.get('/by-service', optionalAuth, asyncHandler(async (req, res) => {
       // Champs aplatis pour le frontend (évite tout objet imbriqué hasardeux)
       name: typeof usersJoin?.name === 'string' ? usersJoin.name : 'Client',
       avatar: typeof usersJoin?.avatar === 'string' ? usersJoin.avatar : null,
-      // ✅ FIX V13.5.1 : la colonne s'appelle city_name (pas city) dans la table listings
-      city: typeof listingsJoin?.city_name === 'string' ? listingsJoin.city_name : '',
+      // ✅ FIX V13.5.2 : la table listings n'a que city_code (FK), pas de label.
+      // On laisse city vide pour l'instant — le ReviewCard gère ce cas (n'affiche rien)
+      city: '',
     });
   });
 
