@@ -98,7 +98,7 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
   let reviews = [];
   try {
     const { data: revs } = await db.from('reviews')
-      .select('id, rating, comment, verified, created_at, users(name, avatar)')
+      .select('id, rating, comment, verified, created_at, users!reviews_user_id_fkey(name, avatar)')
       .eq('listing_id', listing.id);
     reviews = revs || [];
   } catch (e) { console.log('[GET /:id] reviews error:', e.message); }

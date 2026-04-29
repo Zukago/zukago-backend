@@ -17,7 +17,7 @@ const router = express.Router();
 // Limite : 6 avis par service, uniquement visible=true et verified=true
 router.get('/by-service', optionalAuth, asyncHandler(async (req, res) => {
   const { data: rows, error } = await db.from('reviews')
-    .select('id, rating, comment, verified, created_at, users(name, avatar), listings(type)')
+    .select('id, rating, comment, verified, created_at, users!reviews_user_id_fkey(name, avatar), listings(type)')
     .eq('visible', true)
     .eq('verified', true)
     .order('created_at', { ascending: false })
@@ -61,7 +61,7 @@ router.get('/by-service', optionalAuth, asyncHandler(async (req, res) => {
 // ─── GET /api/reviews/listing/:id — Avis d'une annonce ──────────────────────
 router.get('/listing/:id', optionalAuth, asyncHandler(async (req, res) => {
   const { data: reviews, error } = await db.from('reviews')
-    .select('*, users(name, avatar)')
+    .select('*, users!reviews_user_id_fkey(name, avatar)')
     .eq('listing_id', req.params.id)
     .eq('visible', true)
     .order('created_at', { ascending: false });
@@ -147,7 +147,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     visible:  true,
     verified: true, // réservation vérifiée ci-dessus
     target_user_id: targetUserIdForReview,
-  }).select('*, users(name, avatar)').single();
+  }).select('*, users!reviews_user_id_fkey(name, avatar)').single();
 
   if (error) {
     console.error('Review insert error:', error.message);
