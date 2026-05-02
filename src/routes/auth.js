@@ -308,4 +308,262 @@ router.get('/me', authenticate, asyncHandler(async (req, res) => {
   res.json({ user });
 }));
 
+// ═══════════════════════════════════════════════════════════════════════════
+// V14.0.1 — MOT DE PASSE OUBLIÉ (flow OTP 6 chiffres, mobile-first)
+// ═══════════════════════════════════════════════════════════════════════════
+// Flow en 3 étapes :
+//   1. POST /forgot-password   → user demande, reçoit un code 6 chiffres par email
+//   2. POST /verify-reset-code → user envoie le code, reçoit un reset_ticket (JWT 5 min)
+//   3. POST /reset-password    → user envoie ticket + nouveau mdp → auto-login
+//
+// Sécurité (style banque) :
+//   - Code chiffré bcrypt en BDD (jamais en clair)
+//   - Expiration 30 min, max 5 tentatives
+//   - Rate limit 3 demandes / heure / email
+//   - Réponse générique (ne révèle pas si l email existe)
+//   - Reset → invalidation de TOUS les refresh_tokens (déconnecte tous les appareils)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const jwt = require('jsonwebtoken');
+
+// Rate limit forgot-password : 3 demandes / heure / IP+email
+const forgotPasswordLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 3,
+  message: { error: 'Trop de demandes. Reessayez dans 1 heure.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${req.ip}_${req.body?.email || 'unknown'}`,
+});
+
+// Rate limit verify-reset-code : 10 tentatives / 15 min / IP+email
+const verifyResetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: 'Trop de tentatives. Reessayez dans 15 minutes.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => `${req.ip}_${req.body?.email || 'unknown'}`,
+});
+
+// POST /api/auth/forgot-password
+// Demande l'envoi d'un code 6 chiffres par email
+router.post('/forgot-password', forgotPasswordLimiter, [
+  body('email').isEmail().normalizeEmail().withMessage('Email invalide'),
+], asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  const { email } = req.body;
+
+  // Réponse générique systématique (anti-énumération)
+  const genericResponse = {
+    message: 'Si un compte existe pour cet email, un code a ete envoye.',
+  };
+
+  // Chercher le user
+  const { data: user } = await db.from('users')
+    .select('id, name, email, password, active')
+    .eq('email', email)
+    .maybeSingle();
+
+  // Si pas de user OU compte désactivé OU compte Google-only (pas de password) → réponse générique sans rien faire
+  if (!user || !user.active || !user.password) {
+    console.log('[ForgotPassword] Demande pour email inexistant/inactif/google-only:', email);
+    return res.json(genericResponse);
+  }
+
+  try {
+    // Générer code 6 chiffres
+    const code = String(Math.floor(100000 + Math.random() * 900000));
+    const codeHash = await bcrypt.hash(code, 10);
+    const expiresAt = new Date(Date.now() + 30 * 60 * 1000); // 30 min
+
+    // Invalider tous les codes pending de cet email (sécurité)
+    await db.from('password_reset_codes')
+      .update({ used: true })
+      .eq('email', email)
+      .eq('used', false);
+
+    // Insérer le nouveau code
+    const { error: insertError } = await db.from('password_reset_codes').insert({
+      email,
+      code_hash:  codeHash,
+      expires_at: expiresAt.toISOString(),
+      attempts:   0,
+      used:       false,
+    });
+
+    if (insertError) {
+      console.log('[ForgotPassword] Erreur insertion code:', insertError.message);
+      return res.json(genericResponse); // toujours générique
+    }
+
+    // Envoyer le code par email
+    try {
+      await emailService.sendPasswordReset(user, code);
+      console.log('[ForgotPassword] Code envoye a', user.email);
+    } catch (e) {
+      console.log('[ForgotPassword] Erreur envoi email:', e.message);
+      // On répond quand même OK pour pas révéler l'erreur
+    }
+  } catch (e) {
+    console.log('[ForgotPassword] Erreur generale:', e.message);
+  }
+
+  return res.json(genericResponse);
+}));
+
+// POST /api/auth/verify-reset-code
+// Vérifie le code 6 chiffres et retourne un reset_ticket (JWT 5 min)
+router.post('/verify-reset-code', verifyResetLimiter, [
+  body('email').isEmail().normalizeEmail().withMessage('Email invalide'),
+  body('code').isLength({ min: 6, max: 6 }).matches(/^\d{6}$/).withMessage('Code invalide'),
+], asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  const { email, code } = req.body;
+
+  // Chercher le code le plus récent non utilisé pour cet email
+  const { data: row } = await db.from('password_reset_codes')
+    .select('id, code_hash, expires_at, attempts, used')
+    .eq('email', email)
+    .eq('used', false)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (!row) {
+    return res.status(400).json({ error: 'Code invalide ou expire' });
+  }
+
+  // Vérifier expiration
+  if (new Date(row.expires_at) < new Date()) {
+    await db.from('password_reset_codes').update({ used: true }).eq('id', row.id);
+    return res.status(400).json({ error: 'Code expire. Demandez un nouveau code.' });
+  }
+
+  // Vérifier le nombre de tentatives (max 5)
+  if (row.attempts >= 5) {
+    await db.from('password_reset_codes').update({ used: true }).eq('id', row.id);
+    return res.status(429).json({ error: 'Trop de tentatives. Demandez un nouveau code.' });
+  }
+
+  // Incrémenter attempts AVANT le compare (pour pénaliser même les échecs)
+  await db.from('password_reset_codes')
+    .update({ attempts: row.attempts + 1 })
+    .eq('id', row.id);
+
+  // Vérifier le code
+  const valid = await bcrypt.compare(code, row.code_hash);
+  if (!valid) {
+    const remaining = Math.max(0, 5 - (row.attempts + 1));
+    return res.status(400).json({
+      error: remaining > 0
+        ? `Code incorrect. ${remaining} tentative(s) restante(s).`
+        : 'Code incorrect. Demandez un nouveau code.',
+    });
+  }
+
+  // Code valide → générer un reset_ticket JWT (5 min, scope password_reset)
+  const resetTicket = jwt.sign(
+    { email, codeId: row.id, scope: 'password_reset' },
+    process.env.JWT_SECRET,
+    { expiresIn: '5m' }
+  );
+
+  console.log('[VerifyResetCode] Code valide pour', email);
+  res.json({ reset_ticket: resetTicket, expires_in: 300 });
+}));
+
+// POST /api/auth/reset-password
+// Vérifie le ticket, change le mot de passe, déconnecte tous les appareils, auto-login
+router.post('/reset-password', [
+  body('reset_ticket').notEmpty().withMessage('Ticket manquant'),
+  body('new_password')
+    .isLength({ min: 8 }).withMessage('Mot de passe minimum 8 caracteres')
+    .matches(/\d/).withMessage('Le mot de passe doit contenir au moins 1 chiffre'),
+], asyncHandler(async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+  const { reset_ticket, new_password } = req.body;
+
+  // Vérifier le ticket
+  let payload;
+  try {
+    payload = jwt.verify(reset_ticket, process.env.JWT_SECRET);
+  } catch (e) {
+    return res.status(401).json({ error: 'Ticket invalide ou expire. Recommencez la procedure.' });
+  }
+
+  if (payload?.scope !== 'password_reset' || !payload?.email) {
+    return res.status(401).json({ error: 'Ticket invalide.' });
+  }
+
+  const { email, codeId } = payload;
+
+  // Vérifier que le code n'a pas déjà été utilisé (anti-replay)
+  if (codeId) {
+    const { data: codeRow } = await db.from('password_reset_codes')
+      .select('used')
+      .eq('id', codeId)
+      .maybeSingle();
+    if (codeRow?.used) {
+      return res.status(401).json({ error: 'Ticket deja utilise. Recommencez la procedure.' });
+    }
+  }
+
+  // Récupérer le user
+  const { data: user } = await db.from('users')
+    .select('id, name, email, role, avatar, active, verified, demande_verified')
+    .eq('email', email)
+    .maybeSingle();
+
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  if (!user.active) return res.status(401).json({ error: 'Compte desactive. Contactez le support.' });
+
+  // Hasher le nouveau mot de passe
+  const hashedPassword = await bcrypt.hash(new_password, 12);
+
+  // ✅ Style banque : changer le mdp ET invalider TOUS les refresh tokens
+  // (déconnecte le user de tous ses appareils par sécurité)
+  const { error: updateError } = await db.from('users').update({
+    password:               hashedPassword,
+    refresh_token:          null,
+    refresh_token_expires:  null,
+  }).eq('id', user.id);
+
+  if (updateError) {
+    console.log('[ResetPassword] Erreur update user:', updateError.message);
+    return res.status(500).json({ error: 'Impossible de mettre a jour le mot de passe.' });
+  }
+
+  // Marquer tous les codes pending de cet email comme used (anti-replay)
+  await db.from('password_reset_codes')
+    .update({ used: true })
+    .eq('email', email)
+    .eq('used', false);
+
+  // Email de confirmation (best effort, ne bloque pas)
+  try {
+    await emailService.sendPasswordResetConfirmation(user);
+    console.log('[ResetPassword] Email confirmation envoye a', user.email);
+  } catch (e) {
+    console.log('[ResetPassword] Erreur envoi email confirmation:', e.message);
+  }
+
+  // Auto-login : générer nouveaux tokens et les sauvegarder
+  const tokens = generateTokens(user.id);
+  const refreshExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  await db.from('users').update({
+    refresh_token:         tokens.refreshToken,
+    refresh_token_expires: refreshExpires,
+  }).eq('id', user.id);
+
+  console.log('[ResetPassword] Mot de passe change pour', user.email);
+  res.json({ user, ...tokens });
+}));
+
 module.exports = router;
