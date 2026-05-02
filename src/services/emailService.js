@@ -19,50 +19,39 @@ const MAILGUN_BASE = `https://api.eu.mailgun.net/v3/${MAILGUN_DOMAIN}/messages`;
  */
 async function sendEmail({ to, subject, html, text }) {
   if (!MAILGUN_API_KEY) {
-    console.log('[emailService] MAILGUN_API_KEY manquant');
-    return null;
-  }
-  if (!MAILGUN_DOMAIN) {
-    console.log('[emailService] MAILGUN_DOMAIN manquant');
-    return null;
+    console.log('[emailService] MAILGUN_API_KEY manquant — email non envoyé:', subject);
+    return;
   }
 
-  // Construire le corps en URLSearchParams
-  const params = new URLSearchParams();
-  params.append('from',    MAILGUN_FROM);
-  params.append('to',      to);
-  params.append('subject', subject);
-  if (html) params.append('html', html);
-  if (text) params.append('text', text);
-
-  // Encoder la clé en Base64 pour Basic Auth
-  const credentials = Buffer.from('api:' + MAILGUN_API_KEY).toString('base64');
+  const body = new URLSearchParams({
+    from:    MAILGUN_FROM,
+    to,
+    subject,
+    html:    html || '',
+    text:    text || '',
+  });
 
   try {
     const response = await fetch(MAILGUN_BASE, {
       method:  'POST',
       headers: {
-        'Authorization': 'Basic ' + credentials,
-        'Content-Type':  'application/x-www-form-urlencoded',
+        Authorization: 'Basic ' + Buffer.from(`api:${MAILGUN_API_KEY}`).toString('base64'),
+        'Content-Type': 'application/x-www-form-urlencoded',
       },
-      body: params.toString(),
+      body: body.toString(),
     });
 
-    let data;
-    try { data = await response.json(); } catch(e) { data = {}; }
-
-    if (response.ok) {
-      console.log('[Mailgun] OK — envoyé à:', to, '| sujet:', subject, '| id:', data.id);
+    const data = await response.json();
+    if (!response.ok) {
+      console.log('[emailService] Mailgun error:', response.status, JSON.stringify(data));
+      console.log('[emailService] URL:', MAILGUN_BASE);
+      console.log('[emailService] Domain:', MAILGUN_DOMAIN);
     } else {
-      console.log('[Mailgun] ERREUR', response.status, ':', JSON.stringify(data));
-      console.log('[Mailgun] URL:', MAILGUN_BASE);
-      console.log('[Mailgun] From:', MAILGUN_FROM);
-      console.log('[Mailgun] To:', to);
+      console.log('[emailService] Email envoye a', to, ':', subject, '| ID:', data.id);
     }
     return data;
   } catch (e) {
-    console.log('[Mailgun] Exception:', e.message);
-    return null;
+    console.log('[emailService] Fetch error:', e.message);
   }
 }
 
@@ -264,23 +253,65 @@ async function sendPartnerRejected(user, reason) {
 }
 
 /**
- * Test de connexion Mailgun — appeler depuis Railway console
- * node -e "require('./src/services/emailService').testConnection()"
+ * V14.0.1 — Email de réinitialisation de mot de passe (code 6 chiffres)
  */
-async function testConnection() {
-  console.log('Testing Mailgun...');
-  console.log('API Key:', MAILGUN_API_KEY ? MAILGUN_API_KEY.substring(0, 8) + '...' : 'MISSING');
-  console.log('Domain:', MAILGUN_DOMAIN);
-  console.log('URL:', MAILGUN_BASE);
-  
-  const result = await sendEmail({
-    to:      'thomymonkam@yahoo.fr',
-    subject: 'ZUKAGO — Test Mailgun',
-    html:    '<p>Test email depuis Railway</p>',
-    text:    'Test email depuis Railway',
+async function sendPasswordReset(user, code) {
+  const html = baseTemplate(`
+    <p class="title">Réinitialisation de votre mot de passe</p>
+    <p class="text">Bonjour ${user.name},</p>
+    <p class="text">Vous avez demandé à réinitialiser votre mot de passe ZUKAGO. Voici votre code de vérification :</p>
+
+    <div style="background:#F7F8FC;border:2px solid #B98637;border-radius:14px;padding:24px;text-align:center;margin:24px 0;">
+      <p style="margin:0 0 8px;font-size:12px;color:#9AA5B4;letter-spacing:2px;text-transform:uppercase;">Code de vérification</p>
+      <p style="margin:0;font-size:36px;font-weight:900;color:#0D1E3B;letter-spacing:12px;font-family:Menlo,Monaco,Consolas,monospace;">${code}</p>
+      <p style="margin:12px 0 0;font-size:12px;color:#9AA5B4;">Valable 30 minutes</p>
+    </div>
+
+    <p class="text">Saisissez ce code dans l'application ZUKAGO pour choisir un nouveau mot de passe.</p>
+
+    <hr class="divider">
+    <p class="text" style="font-size:13px;color:#9AA5B4;">
+      <strong>Vous n'êtes pas à l'origine de cette demande ?</strong><br>
+      Ignorez cet email, votre mot de passe restera inchangé. Aucune action n'a été effectuée sur votre compte.
+    </p>
+    <p class="text" style="font-size:12px;color:#9AA5B4;">
+      Pour votre sécurité, ne communiquez jamais ce code à qui que ce soit. ZUKAGO ne vous le demandera jamais.
+    </p>
+  `);
+
+  return sendEmail({
+    to:      user.email,
+    subject: `ZUKAGO — Code de réinitialisation : ${code}`,
+    html,
+    text:    `Bonjour ${user.name}, votre code de réinitialisation ZUKAGO est : ${code} (valable 30 minutes). Si vous n'êtes pas à l'origine de cette demande, ignorez cet email.`,
   });
-  console.log('Result:', JSON.stringify(result));
-  return result;
+}
+
+/**
+ * V14.0.1 — Email de confirmation après changement de mot de passe (sécurité)
+ */
+async function sendPasswordResetConfirmation(user) {
+  const html = baseTemplate(`
+    <p class="title">Mot de passe modifié</p>
+    <p class="text">Bonjour ${user.name},</p>
+    <p class="text">Votre mot de passe ZUKAGO a été modifié avec succès.</p>
+    <p class="text">Pour votre sécurité, vous avez été déconnecté de tous vos appareils. Reconnectez-vous avec votre nouveau mot de passe.</p>
+
+    <hr class="divider">
+    <div style="background:#FEE2E2;border-radius:10px;padding:16px;margin:16px 0;">
+      <p class="text" style="margin:0;color:#B91C1C;font-weight:700;">⚠️ Vous n'êtes pas à l'origine de ce changement ?</p>
+      <p class="text" style="margin:8px 0 0;font-size:13px;color:#7F1D1D;">
+        Contactez immédiatement notre support à <a href="mailto:contact@zukago.com" style="color:#B91C1C;font-weight:700;">contact@zukago.com</a> pour sécuriser votre compte.
+      </p>
+    </div>
+  `);
+
+  return sendEmail({
+    to:      user.email,
+    subject: 'ZUKAGO — Votre mot de passe a été modifié',
+    html,
+    text:    `Bonjour ${user.name}, votre mot de passe ZUKAGO a été modifié avec succès. Si vous n'êtes pas à l'origine de ce changement, contactez immédiatement contact@zukago.com.`,
+  });
 }
 
 module.exports = {
@@ -290,5 +321,6 @@ module.exports = {
   sendNewBookingToPartner,
   sendPartnerApproved,
   sendPartnerRejected,
-  testConnection,
+  sendPasswordReset,
+  sendPasswordResetConfirmation,
 };
