@@ -16,6 +16,7 @@ const { generateTokens, authenticate } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
 const emailService = require('../services/emailService');
 const crypto    = require('crypto');
+const jwt      = require('jsonwebtoken'); // ✅ V14.0.2 : déplacé en haut (était au milieu du fichier)
 
 const router = express.Router();
 
@@ -323,8 +324,6 @@ router.get('/me', authenticate, asyncHandler(async (req, res) => {
 //   - Réponse générique (ne révèle pas si l email existe)
 //   - Reset → invalidation de TOUS les refresh_tokens (déconnecte tous les appareils)
 // ═══════════════════════════════════════════════════════════════════════════
-
-const jwt = require('jsonwebtoken');
 
 // Rate limit forgot-password : 3 demandes / heure / IP+email
 const forgotPasswordLimiter = rateLimit({
