@@ -284,26 +284,12 @@ router.post('/', authenticate, [
   statsService.updateDay();
 
   // ── Notification au partenaire (V13 : sans emoji UI)
-  try {
-    await db.from('notifications').insert({
-      user_id: listing.partners?.user_id,
-      title: 'Nouvelle réservation',
-      body: `${req.user.name || 'Un client'} a réservé "${listing.title}"${start_date ? ` du ${start_date} au ${end_date}` : ''}`,
-      type: 'booking',
-    });
-  } catch(e) { console.log('Notif error:', e.message); }
+  // V14.3 : DÉPLACÉE dans PATCH /:id/confirm pour ne notifier qu'après paiement réussi
+  // (évite d'envoyer une notif pour une réservation qui ne sera jamais payée)
 
-  // Emails (non bloquants)
-  try {
-    const { data: user }    = await db.from('users').select('name, email').eq('id', req.user.id).single();
-    const { data: partner } = await db.from('users').select('name, email').eq('id', listing.partners?.user_id).single();
-    if (user && partner) {
-      await Promise.all([
-        emailService.sendBookingConfirmation(user, booking, listing).catch(()=>{}),
-        emailService.sendNewBookingToPartner(partner, booking, listing, user).catch(()=>{}),
-      ]);
-    }
-  } catch(e) { console.log('Email error:', e.message); }
+  // ✅ V14.3 — Emails DÉPLACÉS dans PATCH /:id/confirm
+  // Pas d'email envoyé tant que le paiement n'est pas confirmé via Stripe.
+  // Évite : "j'ai annulé Stripe Sheet mais j'ai reçu l'email de confirmation"
 
   res.status(201).json({
     booking,
@@ -343,6 +329,9 @@ router.get('/:id', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // ─── PATCH /api/bookings/:id/confirm — Confirmer après paiement ───────────────
+// V14.3 : Cette route reste UTILE pour CinetPay/PayPal future (paiements manuels)
+// MAIS pour Stripe, c'est le webhook /payments/stripe/webhook qui gère tout.
+// Les emails sont envoyés DANS LE WEBHOOK, pas ici (architecture pro).
 router.patch('/:id/confirm', authenticate, asyncHandler(async (req, res) => {
   const { payment_ref } = req.body;
 
