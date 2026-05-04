@@ -199,8 +199,22 @@ router.post('/google', asyncHandler(async (req, res) => {
       const verifyRes  = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${googleToken}`);
       const verifyData = await verifyRes.json();
       if (verifyData.error) return res.status(401).json({ error: 'Token Google invalide' });
-      const clientId = process.env.GOOGLE_CLIENT_ID;
-      if (clientId && verifyData.aud !== clientId) return res.status(401).json({ error: 'Token Google non autorise' });
+
+      // ✅ V13.5 : Multi-audience — accepter les tokens iOS, Android et Web
+      // Un token Google est lié à UNE seule audience (le Client ID qui l'a généré).
+      // L'app iPhone utilise l'iOS Client ID, l'app Android utilisera l'Android Client ID, le Web utilise le Web Client ID.
+      // Le backend doit accepter les 3 (au moins ceux configurés via env).
+      const allowedAudiences = [
+        process.env.GOOGLE_CLIENT_ID,         // Web Client ID (legacy / web app)
+        process.env.GOOGLE_IOS_CLIENT_ID,     // iOS Client ID (iPhone)
+        process.env.GOOGLE_ANDROID_CLIENT_ID, // Android Client ID (futur)
+      ].filter(Boolean); // retire les variables non définies
+
+      if (allowedAudiences.length > 0 && !allowedAudiences.includes(verifyData.aud)) {
+        console.log('[Auth Google] Token rejeté — audience reçue:', verifyData.aud, '— audiences attendues:', allowedAudiences);
+        return res.status(401).json({ error: 'Token Google non autorise' });
+      }
+
       verifiedEmail  = verifyData.email;
       verifiedName   = verifyData.name || verifyData.email?.split('@')[0];
       verifiedAvatar = verifyData.picture;
