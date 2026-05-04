@@ -35,11 +35,15 @@ async function checkOverlap(listing, params) {
       return { conflict: true, reason: 'Trajet sans places configurées' };
     }
 
-    // Compter les places déjà réservées (pending + confirmed) pour ce listing
+    // Compter les places déjà réservées (pending récent + confirmed) pour ce listing
+    // ✅ V14.3 : Les pending > 30 min sont ignorés (user a abandonné le paiement)
+    const HOLD_DURATION_MIN = 30;
+    const holdCutoff = new Date(Date.now() - HOLD_DURATION_MIN * 60 * 1000).toISOString();
+
     const { data: activeBookings } = await db.from('bookings')
-      .select('seats_booked')
+      .select('seats_booked, status, created_at')
       .eq('listing_id', listing.id)
-      .in('status', ['pending', 'confirmed']);
+      .or(`status.eq.confirmed,and(status.eq.pending,created_at.gte.${holdCutoff})`);
 
     const seatsTaken = (activeBookings || [])
       .reduce((sum, b) => sum + (Number(b.seats_booked) || 0), 0);
@@ -67,11 +71,19 @@ async function checkOverlap(listing, params) {
   // Apt / Hotel / Car / Driver-jour : check overlap dates
   // ✅ V13.5.4 : pour driver, inégalités INCLUSIVES (.lte + .gte) car end_date est presté.
   //    Apt/hotel/car : inégalités STRICTES (.lt + .gt) car end_date est le jour de check-out (libre).
+  // ✅ V14.3 : Les bookings 'pending' > 30 min sont IGNORÉS (user a abandonné le paiement)
+  //    → Évite de bloquer les dates indéfiniment si user annule la Stripe Sheet
+  //    → Comme Booking.com / Airbnb : "hold" temporaire 30 min puis libération
   const isDriver = listing.type === 'driver';
+  const HOLD_DURATION_MIN = 30; // ⏱️ Durée du "hold" pour bookings pending non payés
+  const holdCutoff = new Date(Date.now() - HOLD_DURATION_MIN * 60 * 1000).toISOString();
+
   let query = db.from('bookings')
-    .select('id, room_type_id')
+    .select('id, room_type_id, status, created_at')
     .eq('listing_id', listing.id)
-    .in('status', ['confirmed', 'pending']);
+    .in('status', ['confirmed', 'pending'])
+    // V14.3 : confirmed bloque toujours, pending bloque seulement < 30 min
+    .or(`status.eq.confirmed,and(status.eq.pending,created_at.gte.${holdCutoff})`);
 
   if (isDriver) {
     // Driver mode 'day' : du start au end inclus → conflit si chevauchement même partiel
@@ -283,13 +295,36 @@ router.post('/', authenticate, [
   // Mettre à jour stats_daily (non bloquant)
   statsService.updateDay();
 
-  // ── Notification au partenaire (V13 : sans emoji UI)
-  // V14.3 : DÉPLACÉE dans PATCH /:id/confirm pour ne notifier qu'après paiement réussi
-  // (évite d'envoyer une notif pour une réservation qui ne sera jamais payée)
+  // ── Notification au partenaire + Emails
+  // V14.4 : Pour CARD (Stripe), le booking est créé via /payments/stripe/prepare puis webhook
+  //         → POST /bookings n'est PAS appelé pour card → aucun email envoyé d'ici (OK)
+  //         → Le webhook Stripe envoie les emails après paiement confirmé
+  // V14.4 : Pour MTN/Orange/PayPal (mode démo / futur CinetPay), POST /bookings est appelé
+  //         → On envoie les emails ICI car pas de webhook actuellement
+  //         → TODO V14.5 : refactor CinetPay avec /prepare comme Stripe
+  if (payment_method !== 'card') {
+    // Notification partenaire
+    try {
+      await db.from('notifications').insert({
+        user_id: listing.partners?.user_id,
+        title: 'Nouvelle réservation',
+        body: `${req.user.name || 'Un client'} a réservé "${listing.title}"${start_date ? ` du ${start_date} au ${end_date}` : ''}`,
+        type: 'booking',
+      });
+    } catch(e) { console.log('Notif error:', e.message); }
 
-  // ✅ V14.3 — Emails DÉPLACÉS dans PATCH /:id/confirm
-  // Pas d'email envoyé tant que le paiement n'est pas confirmé via Stripe.
-  // Évite : "j'ai annulé Stripe Sheet mais j'ai reçu l'email de confirmation"
+    // Emails (non bloquants)
+    try {
+      const { data: user }    = await db.from('users').select('name, email').eq('id', req.user.id).single();
+      const { data: partner } = await db.from('users').select('name, email').eq('id', listing.partners?.user_id).single();
+      if (user && partner) {
+        await Promise.all([
+          emailService.sendBookingConfirmation(user, booking, listing).catch(()=>{}),
+          emailService.sendNewBookingToPartner(partner, booking, listing, user).catch(()=>{}),
+        ]);
+      }
+    } catch(e) { console.log('Email error:', e.message); }
+  }
 
   res.status(201).json({
     booking,
