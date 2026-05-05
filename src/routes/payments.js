@@ -219,21 +219,25 @@ router.post('/stripe/intent', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // ─── POST /api/payments/stripe/webhook — Webhook Stripe ───────────────────────
-// V14.3 : ARCHITECTURE PRO — Email envoyé UNIQUEMENT après paiement confirmé par Stripe
-// Le frontend ne fait RIEN après la sheet — c'est le webhook qui termine tout.
-// V14.4.2 : Utilise req.rawBody (Buffer) attaché par express.json({verify}) dans index.js
+// V14.4.3 : index.js applique express.raw() pour cette route
+//   → req.body est un Buffer brut (PAS un objet JS parsé)
+//   → constructEvent() peut vérifier la signature HMAC
 router.post('/stripe/webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
 
+  console.log('[Stripe webhook] === REQUEST RECEIVED ===');
+  console.log('[Stripe webhook] sig present:', !!sig);
+  console.log('[Stripe webhook] body type:', typeof req.body, 'isBuffer:', Buffer.isBuffer(req.body));
+  console.log('[Stripe webhook] body length:', req.body?.length);
+  console.log('[Stripe webhook] STRIPE_WEBHOOK_SECRET set:', !!process.env.STRIPE_WEBHOOK_SECRET);
+
   try {
-    // V14.4.2 : req.rawBody est attaché par le middleware verify dans index.js
-    //           (sinon fallback sur req.body au cas où)
-    const payload = req.rawBody || req.body;
-    event = stripe.webhooks.constructEvent(payload, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    // V14.4.3 : req.body doit être un Buffer (raw body)
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    console.log('[Stripe webhook] ✅ Signature OK, event type:', event.type);
   } catch (err) {
-    console.log('[Stripe webhook] Signature error:', err.message);
-    console.log('[Stripe webhook] Has rawBody:', !!req.rawBody, 'isBuffer:', Buffer.isBuffer(req.rawBody));
+    console.log('[Stripe webhook] ❌ Signature error:', err.message);
     return res.status(400).json({ error: `Webhook error: ${err.message}` });
   }
 

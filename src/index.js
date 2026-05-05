@@ -14,7 +14,29 @@ app.set('trust proxy', 1);
 // ─── MIDDLEWARE GLOBAL ────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors({ origin: process.env.FRONTEND_URL || '*', credentials: true }));
-app.use(express.json({ limit: '50mb' }));
+
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║ V14.4.3 ULTIME : WEBHOOK STRIPE — Body parsing CONDITIONNEL                ║
+// ║                                                                            ║
+// ║ Stripe signe le RAW body (Buffer brut) avec HMAC.                          ║
+// ║ Si express.json() le modifie (réorganise clés, espaces), signature KO.     ║
+// ║                                                                            ║
+// ║ Solution : router le body parser selon l'URL                               ║
+// ║   • /api/payments/stripe/webhook → express.raw (Buffer pur)                ║
+// ║   • Toutes autres routes         → express.json (objet JS)                 ║
+// ║                                                                            ║
+// ║ + verify pour stocker rawBody en backup                                    ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+app.use((req, res, next) => {
+  // CRITIQUE : Stripe envoie POST /api/payments/stripe/webhook
+  // On doit utiliser raw() qui garde le Buffer intact
+  if (req.originalUrl === '/api/payments/stripe/webhook') {
+    console.log('[BodyParser] → Webhook Stripe détecté, utilisation de express.raw()');
+    return express.raw({ type: '*/*', limit: '50mb' })(req, res, next);
+  }
+  // Toutes les autres routes : JSON normal
+  return express.json({ limit: '50mb' })(req, res, next);
+});
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Rate limiting — V12 : augmenté pour usage normal app mobile (beaucoup de GET)
