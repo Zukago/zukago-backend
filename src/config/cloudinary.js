@@ -38,11 +38,30 @@ const documentStorage = new CloudinaryStorage({
   },
 });
 
+// V14.5 : Storage pour avatars (photos de profil)
+// Crop carré 400x400, qualité auto, format auto (WebP)
+const avatarStorage = new CloudinaryStorage({
+  cloudinary,
+  params: {
+    folder: 'zukago/avatars',
+    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
+    transformation: [{
+      width:        400,
+      height:       400,
+      crop:         'fill',         // ← rogne en carré centré
+      gravity:      'face',         // ← centre sur le visage si détecté
+      quality:      'auto:good',
+      fetch_format: 'auto',
+    }],
+  },
+});
+
 const uploadListing  = multer({ storage: listingStorage,  limits: { fileSize: 10 * 1024 * 1024 } });
 const uploadDocument = multer({ storage: documentStorage, limits: { fileSize: 5  * 1024 * 1024 } });
+const uploadAvatar   = multer({ storage: avatarStorage,   limits: { fileSize: 5  * 1024 * 1024 } });
 
 const deleteImage = async (publicId) => {
   return await cloudinary.uploader.destroy(publicId);
 };
 
-module.exports = { cloudinary, uploadListing, uploadDocument, deleteImage };
+module.exports = { cloudinary, uploadListing, uploadDocument, uploadAvatar, deleteImage };

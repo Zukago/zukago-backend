@@ -2,7 +2,7 @@ const express = require('express');
 const db = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { uploadListing, uploadDocument, deleteImage } = require('../config/cloudinary');
+const { uploadListing, uploadDocument, uploadAvatar, deleteImage } = require('../config/cloudinary');
 
 const router = express.Router();
 
@@ -140,6 +140,23 @@ router.post('/partner-doc', authenticate,
       url:  req.file.path,
       type: docType,
       message: 'Document uploadé',
+    });
+  })
+);
+
+// ─── V14.5 : POST /api/uploads/avatar — Photo de profil utilisateur ──────────
+// Upload vers Cloudinary (folder /avatars, crop carré 400x400 face-detected)
+// PAS d'écriture en DB — le frontend reçoit l'URL et appelle PATCH /users/me ensuite
+router.post('/avatar', authenticate,
+  uploadAvatar.single('avatar'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'Aucune photo envoyée' });
+
+    console.log(`[avatar] user=${req.user.id} url=${req.file.path}`);
+
+    res.json({
+      url:     req.file.path,
+      message: 'Photo de profil uploadée',
     });
   })
 );
