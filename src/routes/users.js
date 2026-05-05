@@ -59,4 +59,33 @@ router.post('/change-password', authenticate, asyncHandler(async (req, res) => {
   res.json({ message: 'Mot de passe mis à jour avec succès' });
 }));
 
+// ─── V14.3 : PATCH /api/users/preferred-lang — Sauvegarder langue préférée ──
+// Appelé par LanguageContext.setLang() côté frontend
+// Permet aux notifications push d'être traduites côté backend (style Booking/Airbnb)
+router.patch('/preferred-lang', authenticate, asyncHandler(async (req, res) => {
+  const { lang } = req.body;
+
+  // Validation : seules les langues actives ZUKAGO sont acceptées
+  const VALID_LANGS = ['fr', 'en', 'de'];
+  if (!lang || !VALID_LANGS.includes(lang)) {
+    return res.status(400).json({
+      error: 'Langue invalide. Valeurs autorisées : fr, en, de'
+    });
+  }
+
+  // Update DB
+  const { error } = await db.from('users')
+    .update({ preferred_lang: lang, updated_at: new Date() })
+    .eq('id', req.user.id);
+
+  if (error) {
+    console.log('[preferred-lang] Update error:', error.message);
+    return res.status(500).json({ error: 'Impossible de sauvegarder la langue' });
+  }
+
+  console.log('[preferred-lang] User', req.user.id, '→', lang);
+
+  res.json({ ok: true, lang });
+}));
+
 module.exports = router;

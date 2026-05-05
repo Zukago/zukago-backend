@@ -67,6 +67,7 @@ app.use('/api/notifications', require('./routes/notifications'));
 app.use('/api/uploads',       require('./routes/uploads'));
 app.use('/api/places',        require('./routes/places'));
 app.use('/api/carpool',       require('./routes/carpool'));   // ✅ V9 : covoiturage
+app.use('/api/messages',      require('./routes/messages'));  // ✅ V14.3 : chat in-app
 
 // Health check
 app.get('/health', (req, res) => {
