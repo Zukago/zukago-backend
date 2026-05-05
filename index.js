@@ -16,17 +16,21 @@ app.use(helmet());
 app.use(cors({ origin: process.env.FRONTEND_URL || '*', credentials: true }));
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
-// ║ V14.4 : WEBHOOK STRIPE — DOIT être monté AVANT express.json()              ║
-// ║ Stripe a besoin du RAW body (Buffer brut) pour vérifier la signature.      ║
-// ║ Si express.json() parse le body avant, constructEvent() échoue (400 err).  ║
+// ║ V14.4.1 : WEBHOOK STRIPE — Préserver le RAW body pour la signature.        ║
+// ║ Stripe a besoin du Buffer brut pour vérifier la signature HMAC.            ║
+// ║ Solution : appliquer express.raw() UNIQUEMENT sur la route webhook,        ║
+// ║ et express.json() sur toutes les AUTRES routes.                            ║
 // ║ → C'est pour ça que les emails ne partaient pas après paiement Stripe !    ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
-app.use('/api/payments/stripe/webhook',
-  express.raw({ type: 'application/json' }),
-  require('./routes/payments')
-);
-
-app.use(express.json({ limit: '50mb' }));
+app.use((req, res, next) => {
+  if (req.originalUrl === '/api/payments/stripe/webhook') {
+    // Pour le webhook : raw body (Buffer)
+    express.raw({ type: 'application/json', limit: '50mb' })(req, res, next);
+  } else {
+    // Pour toutes les autres routes : JSON parsé
+    express.json({ limit: '50mb' })(req, res, next);
+  }
+});
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Rate limiting — V12 : augmenté pour usage normal app mobile (beaucoup de GET)
