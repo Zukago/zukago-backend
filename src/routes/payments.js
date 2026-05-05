@@ -221,14 +221,19 @@ router.post('/stripe/intent', authenticate, asyncHandler(async (req, res) => {
 // ─── POST /api/payments/stripe/webhook — Webhook Stripe ───────────────────────
 // V14.3 : ARCHITECTURE PRO — Email envoyé UNIQUEMENT après paiement confirmé par Stripe
 // Le frontend ne fait RIEN après la sheet — c'est le webhook qui termine tout.
-router.post('/stripe/webhook', express.raw({ type: 'application/json' }), async (req, res) => {
+// V14.4.2 : Utilise req.rawBody (Buffer) attaché par express.json({verify}) dans index.js
+router.post('/stripe/webhook', async (req, res) => {
   const sig = req.headers['stripe-signature'];
   let event;
 
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    // V14.4.2 : req.rawBody est attaché par le middleware verify dans index.js
+    //           (sinon fallback sur req.body au cas où)
+    const payload = req.rawBody || req.body;
+    event = stripe.webhooks.constructEvent(payload, sig, process.env.STRIPE_WEBHOOK_SECRET);
   } catch (err) {
     console.log('[Stripe webhook] Signature error:', err.message);
+    console.log('[Stripe webhook] Has rawBody:', !!req.rawBody, 'isBuffer:', Buffer.isBuffer(req.rawBody));
     return res.status(400).json({ error: `Webhook error: ${err.message}` });
   }
 
@@ -236,6 +241,13 @@ router.post('/stripe/webhook', express.raw({ type: 'application/json' }), async 
   if (event.type === 'payment_intent.succeeded') {
     const pi = event.data.object;
     const meta = pi.metadata || {};
+
+    console.log('[Stripe webhook] === payment_intent.succeeded ===');
+    console.log('[Stripe webhook] PI ID:', pi.id);
+    console.log('[Stripe webhook] Metadata keys:', Object.keys(meta).join(', '));
+    console.log('[Stripe webhook] listing_id:', meta.listing_id);
+    console.log('[Stripe webhook] user_id:', meta.user_id);
+    console.log('[Stripe webhook] booking_id:', meta.booking_id);
 
     // ╔═══════════════════════════════════════════════════════════════════════╗
     // ║ V14.4 : NOUVEAU FLOW — Si metadata.listing_id présent (route /prepare)║
@@ -246,6 +258,7 @@ router.post('/stripe/webhook', express.raw({ type: 'application/json' }), async 
 
     // ─── Nouveau flow V14.4 (booking créé après paiement) ───
     if (meta.listing_id && meta.user_id) {
+      console.log('[Stripe webhook] → Flow V14.4 (créer booking)');
       try {
         const params  = meta.booking_params ? JSON.parse(meta.booking_params) : {};
         const pricing = meta.pricing ? JSON.parse(meta.pricing) : {};
@@ -264,8 +277,20 @@ router.post('/stripe/webhook', express.raw({ type: 'application/json' }), async 
         // Générer un code de réservation unique
         const code = 'ZKG-' + Math.random().toString(36).substring(2, 8).toUpperCase();
 
+        // Calculer nights si possible (depuis start/end dates)
+        let nights = params.unit_count || 1;
+        if (params.start_date && params.end_date) {
+          try {
+            const startD = new Date(params.start_date);
+            const endD   = new Date(params.end_date);
+            const diff = Math.ceil((endD - startD) / (1000 * 60 * 60 * 24));
+            if (diff > 0) nights = diff;
+          } catch(e) {}
+        }
+        const pricePerNight = Math.round((Number(pricing.subtotal) || 0) / Math.max(1, params.unit_count || nights));
+
         // Créer le booking (status='confirmed' direct)
-        const { data: created, error: createError } = await db.from('bookings').insert({
+        const insertData = {
           user_id:         meta.user_id,
           listing_id:      meta.listing_id,
           code,
@@ -275,22 +300,28 @@ router.post('/stripe/webhook', express.raw({ type: 'application/json' }), async 
           payment_ref:     pi.id,
           start_date:      params.start_date || null,
           end_date:        params.end_date || null,
+          nights:          nights,
+          price_per_night: pricePerNight,
           room_type_id:    params.room_type_id || null,
           seats_booked:    params.seats_booked || null,
           unit_type:       params.unit_type || null,
           unit_count:      params.unit_count || null,
-          with_driver:     params.with_driver ?? null,
+          with_driver:     params.with_driver != null ? !!params.with_driver : null,
           zone:            params.zone || null,
           extras:          params.extras || null,
           pickup_time:     params.pickup_time || null,
           pickup_location: params.pickup_location || null,
-          subtotal:        pricing.subtotal || 0,
-          service_fee:     pricing.serviceFee || 0,
-          total:           pricing.total || 0,
-          commission:      pricing.commission || 0,
-          commission_rate: pricing.commissionRate || 0,
-          partner_gets:    pricing.partnerGets || 0,
-        }).select().single();
+          subtotal:        Number(pricing.subtotal) || 0,
+          service_fee:     Number(pricing.serviceFee) || 0,
+          total:           Number(pricing.total) || 0,
+          commission:      Number(pricing.commission) || 0,
+          partner_gets:    Number(pricing.partnerGets) || 0,
+          notes:           '',
+        };
+
+        console.log('[Stripe webhook V14.4] Insert booking data:', JSON.stringify(insertData));
+
+        const { data: created, error: createError } = await db.from('bookings').insert(insertData).select().single();
 
         if (createError) {
           console.log('[Stripe webhook V14.4] Erreur création booking:', createError.message);
@@ -319,11 +350,12 @@ router.post('/stripe/webhook', express.raw({ type: 'application/json' }), async 
           } catch(e) { console.log('[Stripe webhook V14.4] Seats error:', e.message); }
         }
 
-        // Enregistrer commission
+        // Enregistrer commission (non bloquant)
         try {
           await commissionService.record(created.id, listing.partners?.id, pricing.commission || 0, pricing.commissionRate || 0);
           await commissionService.markPaid(created.id);
           await commissionService.creditPartner(listing.partners?.id, pricing.partnerGets || 0);
+          console.log('[Stripe webhook V14.4] Commission OK');
         } catch(e) { console.log('[Stripe webhook V14.4] Commission error:', e.message); }
 
         // Stats
@@ -331,6 +363,9 @@ router.post('/stripe/webhook', express.raw({ type: 'application/json' }), async 
 
         // Notification + emails (envoyés UNIQUEMENT après paiement)
         const partnerUserId = listing.partners?.user_id;
+        console.log('[Stripe webhook V14.4] partnerUserId:', partnerUserId);
+        console.log('[Stripe webhook V14.4] meta.user_id:', meta.user_id);
+
         if (partnerUserId) {
           try {
             await db.from('notifications').insert({
@@ -339,23 +374,38 @@ router.post('/stripe/webhook', express.raw({ type: 'application/json' }), async 
               body:    `Une réservation a été confirmée pour "${listing.title}"${created.start_date ? ` du ${created.start_date} au ${created.end_date}` : ''}`,
               type:    'booking',
             });
+            console.log('[Stripe webhook V14.4] Notif partenaire OK');
           } catch(e) { console.log('[Stripe webhook V14.4] Notif error:', e.message); }
         }
 
         try {
-          const { data: user } = await db.from('users').select('name, email').eq('id', meta.user_id).single();
-          const { data: partner } = partnerUserId
+          const { data: user, error: userErr } = await db.from('users').select('name, email').eq('id', meta.user_id).single();
+          const { data: partner, error: partnerErr } = partnerUserId
             ? await db.from('users').select('name, email').eq('id', partnerUserId).single()
-            : { data: null };
+            : { data: null, error: null };
 
-          if (user && partner && listing) {
-            await Promise.all([
-              emailService.sendBookingConfirmation(user, created, listing).catch(e => console.log('[Stripe webhook V14.4] Email user error:', e.message)),
-              emailService.sendNewBookingToPartner(partner, created, listing, user).catch(e => console.log('[Stripe webhook V14.4] Email partner error:', e.message)),
-            ]);
-            console.log('[Stripe webhook V14.4] Emails envoyés');
+          console.log('[Stripe webhook V14.4] User found:', user ? user.email : 'NO USER', userErr?.message || '');
+          console.log('[Stripe webhook V14.4] Partner found:', partner ? partner.email : 'NO PARTNER', partnerErr?.message || '');
+          console.log('[Stripe webhook V14.4] Listing title:', listing?.title);
+
+          if (user && user.email) {
+            console.log('[Stripe webhook V14.4] → Envoi email USER en cours...');
+            await emailService.sendBookingConfirmation(user, created, listing)
+              .then(() => console.log('[Stripe webhook V14.4] ✅ Email USER envoyé à', user.email))
+              .catch(e => console.log('[Stripe webhook V14.4] ❌ Email USER error:', e.message, e.stack));
+          } else {
+            console.log('[Stripe webhook V14.4] ⚠️ User sans email → skip email user');
           }
-        } catch(e) { console.log('[Stripe webhook V14.4] Email block error:', e.message); }
+
+          if (partner && partner.email) {
+            console.log('[Stripe webhook V14.4] → Envoi email PARTNER en cours...');
+            await emailService.sendNewBookingToPartner(partner, created, listing, user)
+              .then(() => console.log('[Stripe webhook V14.4] ✅ Email PARTNER envoyé à', partner.email))
+              .catch(e => console.log('[Stripe webhook V14.4] ❌ Email PARTNER error:', e.message, e.stack));
+          } else {
+            console.log('[Stripe webhook V14.4] ⚠️ Partner sans email → skip email partner');
+          }
+        } catch(e) { console.log('[Stripe webhook V14.4] ❌ Email block error:', e.message, e.stack); }
 
         return res.json({ received: true });
       } catch (e) {
