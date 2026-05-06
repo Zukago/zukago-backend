@@ -16,20 +16,26 @@ app.use(helmet());
 app.use(cors({ origin: process.env.FRONTEND_URL || '*', credentials: true }));
 
 // ╔═══════════════════════════════════════════════════════════════════════════╗
-// ║ V14.4.1 : WEBHOOK STRIPE — Préserver le RAW body pour la signature.        ║
-// ║ Stripe a besoin du Buffer brut pour vérifier la signature HMAC.            ║
-// ║ Solution : appliquer express.raw() UNIQUEMENT sur la route webhook,        ║
-// ║ et express.json() sur toutes les AUTRES routes.                            ║
-// ║ → C'est pour ça que les emails ne partaient pas après paiement Stripe !    ║
+// ║ V14.4.3 ULTIME : WEBHOOK STRIPE — Body parsing CONDITIONNEL                ║
+// ║                                                                            ║
+// ║ Stripe signe le RAW body (Buffer brut) avec HMAC.                          ║
+// ║ Si express.json() le modifie (réorganise clés, espaces), signature KO.     ║
+// ║                                                                            ║
+// ║ Solution : router le body parser selon l'URL                               ║
+// ║   • /api/payments/stripe/webhook → express.raw (Buffer pur)                ║
+// ║   • Toutes autres routes         → express.json (objet JS)                 ║
+// ║                                                                            ║
+// ║ + verify pour stocker rawBody en backup                                    ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 app.use((req, res, next) => {
+  // CRITIQUE : Stripe envoie POST /api/payments/stripe/webhook
+  // On doit utiliser raw() qui garde le Buffer intact
   if (req.originalUrl === '/api/payments/stripe/webhook') {
-    // Pour le webhook : raw body (Buffer)
-    express.raw({ type: 'application/json', limit: '50mb' })(req, res, next);
-  } else {
-    // Pour toutes les autres routes : JSON parsé
-    express.json({ limit: '50mb' })(req, res, next);
+    console.log('[BodyParser] → Webhook Stripe détecté, utilisation de express.raw()');
+    return express.raw({ type: '*/*', limit: '50mb' })(req, res, next);
   }
+  // Toutes les autres routes : JSON normal
+  return express.json({ limit: '50mb' })(req, res, next);
 });
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
