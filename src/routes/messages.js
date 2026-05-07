@@ -381,13 +381,16 @@ router.get('/conversations', authenticate, asyncHandler(async (req, res) => {
 
   console.log('[Messages] /conversations called by user:', userId);
 
-  // V14.3.3 : retiré la jointure listing_photos (peut planter silencieusement si colonnes diffèrent)
-  // On charge les listings simples, et les photos seront chargées au besoin par le frontend
+  // V14.3.4 : jointure photos avec BONS noms de colonnes (url + sort_order, pas position)
+  // Tri sur is_main + sort_order pour avoir la photo principale en premier
   const { data: allMessages, error } = await db.from('messages')
     .select(`
       id, content, created_at, read,
       listing_id, sender_id, receiver_id,
-      listing:listings!listing_id(id, type, title),
+      listing:listings!listing_id(
+        id, type, title,
+        photos:listing_photos(url, is_main, sort_order)
+      ),
       sender:users!sender_id(id, name, avatar),
       receiver:users!receiver_id(id, name, avatar)
     `)
@@ -408,8 +411,14 @@ router.get('/conversations', authenticate, asyncHandler(async (req, res) => {
     const key = `${msg.listing_id}::${otherUserId}`;
 
     if (!convMap.has(key)) {
+      // V14.3.4 : trier les photos (is_main d'abord, puis sort_order)
+      const sortedPhotos = (msg.listing?.photos || []).slice().sort((a, b) => {
+        if (a.is_main !== b.is_main) return b.is_main ? 1 : -1;
+        return (a.sort_order ?? 99) - (b.sort_order ?? 99);
+      });
+
       convMap.set(key, {
-        listing:    msg.listing,
+        listing: msg.listing ? { ...msg.listing, photos: sortedPhotos } : msg.listing,
         other_user: otherUser,
         last_message: {
           content:    msg.content,
