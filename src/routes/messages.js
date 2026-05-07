@@ -379,14 +379,15 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
 router.get('/conversations', authenticate, asyncHandler(async (req, res) => {
   const userId = req.user.id;
 
+  console.log('[Messages] /conversations called by user:', userId);
+
+  // V14.3.3 : retiré la jointure listing_photos (peut planter silencieusement si colonnes diffèrent)
+  // On charge les listings simples, et les photos seront chargées au besoin par le frontend
   const { data: allMessages, error } = await db.from('messages')
     .select(`
       id, content, created_at, read,
       listing_id, sender_id, receiver_id,
-      listing:listings!listing_id(
-        id, type, title,
-        photos:listing_photos(url, position)
-      ),
+      listing:listings!listing_id(id, type, title),
       sender:users!sender_id(id, name, avatar),
       receiver:users!receiver_id(id, name, avatar)
     `)
@@ -397,6 +398,8 @@ router.get('/conversations', authenticate, asyncHandler(async (req, res) => {
     console.log('[Messages] Conversations fetch error:', error.message);
     return res.status(500).json({ error: error.message });
   }
+
+  console.log('[Messages] /conversations found', (allMessages || []).length, 'messages for user', userId);
 
   const convMap = new Map();
   for (const msg of (allMessages || [])) {
