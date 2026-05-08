@@ -8,6 +8,7 @@ const { body, query, validationResult } = require('express-validator');
 const db = require('../config/database');
 const { authenticate, optionalAuth } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
+const i18n = require('../services/i18nService');
 
 const router = express.Router();
 
@@ -143,14 +144,19 @@ router.delete('/trips/:id', authenticate, asyncHandler(async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
 
   if (bookings?.length) {
-    await db.from('notifications').insert(
-      bookings.map(b => ({
-        user_id: b.passenger_id,
-        title:   'Trajet annulé',
-        body:    'Le conducteur a annulé le trajet. Votre réservation a été annulée.',
-        type:    'info',
-      }))
-    ).catch(() => {});
+    // ✅ V14.5.3 i18n : chaque passager reçoit la notif dans sa langue
+    const notifs = await Promise.all(
+      bookings.map(async (b) => {
+        const L = await i18n.getUserLang(b.passenger_id);
+        return {
+          user_id: b.passenger_id,
+          title:   await i18n.t('notif_trip_cancelled_title', L, 'Trajet annulé'),
+          body:    await i18n.t('notif_trip_cancelled_body',  L, 'Le conducteur a annulé le trajet. Votre réservation a été annulée.'),
+          type:    'info',
+        };
+      })
+    );
+    await db.from('notifications').insert(notifs).catch(() => {});
   }
 
   res.json({ message: 'Trajet supprimé', deleted: true });
@@ -213,10 +219,15 @@ router.post('/trips/:id/book', authenticate, [
   try {
     const { data: passengerInfo } = await db.from('users')
       .select('name').eq('id', req.user.id).single();
+    // ✅ V14.5.3 i18n : notif dans la langue du conducteur
+    const L = await i18n.getUserLang(trip.driver_id);
+    const passengerName = passengerInfo?.name || await i18n.t('notif_a_passenger', L, 'Un passager');
     await db.from('notifications').insert({
       user_id: trip.driver_id,
-      title:   'Nouvelle réservation covoiturage',
-      body:    `${passengerInfo?.name || 'Un passager'} demande ${seats_booked} place(s) sur votre trajet ${trip.from_city} → ${trip.to_city}.`,
+      title:   await i18n.t('notif_new_carpool_booking_title', L, 'Nouvelle réservation covoiturage'),
+      body:    await i18n.t('notif_new_carpool_booking_body',  L, '{name} demande {seats} place(s) sur votre trajet {from} → {to}.', {
+        name: passengerName, seats: seats_booked, from: trip.from_city, to: trip.to_city,
+      }),
       type:    'carpool',
     });
   } catch (e) {}
@@ -241,10 +252,14 @@ router.patch('/bookings/:id/confirm', authenticate, asyncHandler(async (req, res
   await db.from('carpool_bookings').update({ status: 'confirmed' }).eq('id', req.params.id);
 
   try {
+    // ✅ V14.5.3 i18n : notif dans la langue du passager
+    const L = await i18n.getUserLang(booking.passenger_id);
     await db.from('notifications').insert({
       user_id: booking.passenger_id,
-      title:   'Réservation covoiturage confirmée',
-      body:    `Le conducteur a confirmé votre place pour ${booking.carpool_trips.from_city} → ${booking.carpool_trips.to_city} le ${booking.carpool_trips.depart_date}.`,
+      title:   await i18n.t('notif_carpool_confirmed_title', L, 'Réservation covoiturage confirmée'),
+      body:    await i18n.t('notif_carpool_confirmed_body',  L, 'Le conducteur a confirmé votre place pour {from} → {to} le {date}.', {
+        from: booking.carpool_trips.from_city, to: booking.carpool_trips.to_city, date: booking.carpool_trips.depart_date,
+      }),
       type:    'carpool',
     });
   } catch (e) {}
@@ -268,10 +283,14 @@ router.patch('/bookings/:id/cancel', authenticate, asyncHandler(async (req, res)
 
   const notifyUser = isPassenger ? booking.carpool_trips.driver_id : booking.passenger_id;
   try {
+    // ✅ V14.5.3 i18n : notif dans la langue du destinataire
+    const L = await i18n.getUserLang(notifyUser);
     await db.from('notifications').insert({
       user_id: notifyUser,
-      title:   'Réservation annulée',
-      body:    `Une réservation pour ${booking.carpool_trips.from_city} → ${booking.carpool_trips.to_city} a été annulée.`,
+      title:   await i18n.t('notif_carpool_cancelled_title', L, 'Réservation annulée'),
+      body:    await i18n.t('notif_carpool_cancelled_body',  L, 'Une réservation pour {from} → {to} a été annulée.', {
+        from: booking.carpool_trips.from_city, to: booking.carpool_trips.to_city,
+      }),
       type:    'carpool',
     });
   } catch (e) {}
