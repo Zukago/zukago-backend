@@ -26,6 +26,7 @@ const express = require('express');
 const db = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
+const i18n = require('../services/i18nService');
 
 const router = express.Router();
 
@@ -168,6 +169,8 @@ async function sendExpoPush(receiverId, title, body, data = {}) {
 router.get('/conversation/:listingId', authenticate, asyncHandler(async (req, res) => {
   const { listingId } = req.params;
   const userId = req.user.id;
+  // ✅ V14.5.3 i18n : résoudre la langue de l'user pour les errors
+  const L = await i18n.getUserLang(userId);
 
   // Récupérer le listing avec partner.user_id
   const { data: listing, error: lErr } = await db.from('listings')
@@ -176,12 +179,12 @@ router.get('/conversation/:listingId', authenticate, asyncHandler(async (req, re
     .single();
 
   if (lErr || !listing) {
-    return res.status(404).json({ error: 'Annonce introuvable' });
+    return res.status(404).json({ error: await i18n.t('messages_error_listing_not_found', L, 'Annonce introuvable') });
   }
 
   const partnerUserId = listing.partners?.user_id;
   if (!partnerUserId) {
-    return res.status(500).json({ error: 'Partenaire de cette annonce introuvable' });
+    return res.status(500).json({ error: await i18n.t('messages_error_partner_not_found', L, 'Partenaire de cette annonce introuvable') });
   }
 
   // Identifier l'autre participant
@@ -244,16 +247,18 @@ router.get('/conversation/:listingId', authenticate, asyncHandler(async (req, re
 router.post('/', authenticate, asyncHandler(async (req, res) => {
   const { listing_id, content, booking_id } = req.body;
   const senderId = req.user.id;
+  // ✅ V14.5.3 i18n : résoudre la langue du sender pour les errors
+  const L = await i18n.getUserLang(senderId);
 
   // Validations
   if (!listing_id) {
-    return res.status(400).json({ error: 'listing_id requis' });
+    return res.status(400).json({ error: await i18n.t('messages_error_listing_id_required', L, 'listing_id requis') });
   }
   if (!content?.trim()) {
-    return res.status(400).json({ error: 'Message vide' });
+    return res.status(400).json({ error: await i18n.t('messages_error_empty', L, 'Message vide') });
   }
   if (content.length > 2000) {
-    return res.status(400).json({ error: 'Message trop long (max 2000 caractères)' });
+    return res.status(400).json({ error: await i18n.t('messages_error_too_long', L, 'Message trop long (max 2000 caractères)') });
   }
 
   // Récupérer le listing
@@ -263,12 +268,12 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     .single();
 
   if (lErr || !listing) {
-    return res.status(404).json({ error: 'Annonce introuvable' });
+    return res.status(404).json({ error: await i18n.t('messages_error_listing_not_found', L, 'Annonce introuvable') });
   }
 
   const partnerUserId = listing.partners?.user_id;
   if (!partnerUserId) {
-    return res.status(500).json({ error: 'Partenaire de cette annonce introuvable' });
+    return res.status(500).json({ error: await i18n.t('messages_error_partner_not_found', L, 'Partenaire de cette annonce introuvable') });
   }
 
   // Déterminer le receiver
@@ -277,7 +282,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     // Le partenaire répond
     if (!booking_id) {
       return res.status(400).json({
-        error: 'booking_id requis quand le partenaire répond à un client'
+        error: await i18n.t('messages_error_booking_id_required', L, 'booking_id requis quand le partenaire répond à un client')
       });
     }
     const { data: booking } = await db.from('bookings')
@@ -285,7 +290,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
       .eq('id', booking_id)
       .maybeSingle();
     if (!booking) {
-      return res.status(404).json({ error: 'Réservation introuvable' });
+      return res.status(404).json({ error: await i18n.t('messages_error_booking_not_found', L, 'Réservation introuvable') });
     }
     receiverId = booking.user_id;
   } else {
@@ -296,7 +301,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   // Anti self-message
   if (senderId === receiverId) {
     return res.status(400).json({
-      error: 'Impossible de s\'envoyer un message à soi-même'
+      error: await i18n.t('messages_error_self_message', L, 'Impossible de s\'envoyer un message à soi-même')
     });
   }
 
