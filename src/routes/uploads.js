@@ -3,8 +3,20 @@ const db = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { uploadListing, uploadDocument, uploadAvatar, deleteImage } = require('../config/cloudinary');
+const i18n = require('../services/i18nService');
 
 const router = express.Router();
+
+// ✅ V14.5.3 i18n : helper langue (toutes routes authentifiées ici)
+async function _resolveLang(req) {
+  if (req.user?.id) {
+    try { return await i18n.getUserLang(req.user.id); } catch (e) {}
+  }
+  const accept = req.headers['accept-language'] || '';
+  const code = accept.split(',')[0]?.slice(0, 2).toLowerCase();
+  if (['fr', 'en', 'de'].includes(code)) return code;
+  return 'fr';
+}
 
 // Types MIME autorisés pour les photos
 const ALLOWED_MIME_TYPES = [
@@ -15,23 +27,31 @@ const ALLOWED_MIME_TYPES = [
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
 // Middleware validation photos
-const validatePhotos = (req, res, next) => {
+const validatePhotos = async (req, res, next) => {
   if (!req.files?.length) return next();
-  for (const file of req.files) {
-    // ✅ V12 : tolérance — si octet-stream, vérifier l'extension
-    if (file.mimetype === 'application/octet-stream') {
-      const ext = (file.originalname || '').split('.').pop()?.toLowerCase();
-      if (!['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'].includes(ext)) {
-        return res.status(400).json({ error: `Type de fichier non autorise: ${file.originalname}` });
+  try {
+    // ✅ V14.5.3 i18n : résoudre la langue (middleware appelé après authenticate)
+    const L = await _resolveLang(req);
+    for (const file of req.files) {
+      // ✅ V12 : tolérance — si octet-stream, vérifier l'extension
+      if (file.mimetype === 'application/octet-stream') {
+        const ext = (file.originalname || '').split('.').pop()?.toLowerCase();
+        if (!['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'].includes(ext)) {
+          return res.status(400).json({ error: await i18n.t('uploads_error_invalid_type_file', L, 'Type de fichier non autorise: {file}', { file: file.originalname }) });
+        }
+      } else if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
+        return res.status(400).json({ error: await i18n.t('uploads_error_invalid_mimetype', L, 'Type de fichier non autorise: {mime}. Utilisez JPG, PNG ou WebP.', { mime: file.mimetype }) });
       }
-    } else if (!ALLOWED_MIME_TYPES.includes(file.mimetype)) {
-      return res.status(400).json({ error: `Type de fichier non autorise: ${file.mimetype}. Utilisez JPG, PNG ou WebP.` });
+      if (file.size > MAX_FILE_SIZE) {
+        return res.status(400).json({ error: await i18n.t('uploads_error_file_too_large', L, 'Fichier trop volumineux (max 10MB): {file}', { file: file.originalname }) });
+      }
     }
-    if (file.size > MAX_FILE_SIZE) {
-      return res.status(400).json({ error: `Fichier trop volumineux (max 10MB): ${file.originalname}` });
-    }
+    next();
+  } catch (e) {
+    // Safety net : si i18n.t throw, on continue avec le fallback FR pour éviter de hang la requête
+    console.log('[validatePhotos] i18n error:', e.message);
+    next();
   }
-  next();
 };
 
 // ─── POST /api/uploads/listing/:id — Photos d'une annonce ────────────────────
@@ -40,7 +60,8 @@ router.post('/listing/:id', authenticate,
   validatePhotos,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
-    if (!req.files?.length) return res.status(400).json({ error: 'Aucune photo envoyée' });
+    const L = await _resolveLang(req);
+    if (!req.files?.length) return res.status(400).json({ error: await i18n.t('uploads_error_no_photo', L, 'Aucune photo envoyée') });
 
     const photos = req.files.map((file, index) => ({
       listing_id: id,
@@ -53,18 +74,19 @@ router.post('/listing/:id', authenticate,
     const { data: savedPhotos, error } = await db.from('listing_photos').insert(photos).select();
     if (error) throw new Error(error.message);
 
-    res.status(201).json({ photos: savedPhotos, message: `${savedPhotos.length} photo(s) uploadée(s)` });
+    res.status(201).json({ photos: savedPhotos, message: await i18n.t('uploads_photos_uploaded', L, '{count} photo(s) uploadée(s)', { count: savedPhotos.length }) });
   })
 );
 
 // ─── DELETE /api/uploads/photo/:id — Supprimer une photo ─────────────────────
 router.delete('/photo/:id', authenticate, asyncHandler(async (req, res) => {
+  const L = await _resolveLang(req);
   const { data: photo } = await db.from('listing_photos').select('public_id').eq('id', req.params.id).single();
-  if (!photo) return res.status(404).json({ error: 'Photo introuvable' });
+  if (!photo) return res.status(404).json({ error: await i18n.t('uploads_error_photo_not_found', L, 'Photo introuvable') });
 
   await deleteImage(photo.public_id);
   await db.from('listing_photos').delete().eq('id', req.params.id);
-  res.json({ message: 'Photo supprimée' });
+  res.json({ message: await i18n.t('uploads_photo_deleted', L, 'Photo supprimée') });
 }));
 
 // ─── POST /api/uploads/room-type/:id — Photos d'un type de chambre (V11 Sprint B) ───
@@ -73,8 +95,9 @@ router.post('/room-type/:id', authenticate,
   validatePhotos,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
+    const L = await _resolveLang(req);
     console.log(`[upload room-type] id=${id} files=${req.files?.length || 0}`);
-    if (!req.files?.length) return res.status(400).json({ error: 'Aucune photo envoyée' });
+    if (!req.files?.length) return res.status(400).json({ error: await i18n.t('uploads_error_no_photo', L, 'Aucune photo envoyée') });
 
     // Récupérer les URLs Cloudinary
     const newUrls = req.files.map(file => file.path);
@@ -85,7 +108,7 @@ router.post('/room-type/:id', authenticate,
       .select('photos').eq('id', id).single();
     if (selectErr) {
       console.error(`[upload room-type] select error:`, selectErr);
-      return res.status(404).json({ error: 'Type de chambre introuvable' });
+      return res.status(404).json({ error: await i18n.t('uploads_error_room_type_not_found', L, 'Type de chambre introuvable') });
     }
     const merged = [...(existing?.photos || []), ...newUrls];
 
@@ -99,7 +122,7 @@ router.post('/room-type/:id', authenticate,
     }
 
     console.log(`[upload room-type] ${id} success, total photos:`, merged.length);
-    res.status(201).json({ room_type: updated, photos: newUrls, message: `${newUrls.length} photo(s) uploadée(s)` });
+    res.status(201).json({ room_type: updated, photos: newUrls, message: await i18n.t('uploads_photos_uploaded', L, '{count} photo(s) uploadée(s)', { count: newUrls.length }) });
   })
 );
 
@@ -107,13 +130,14 @@ router.post('/room-type/:id', authenticate,
 router.post('/document', authenticate,
   uploadDocument.single('document'),
   asyncHandler(async (req, res) => {
-    if (!req.file) return res.status(400).json({ error: 'Aucun fichier envoyé' });
+    const L = await _resolveLang(req);
+    if (!req.file) return res.status(400).json({ error: await i18n.t('uploads_error_no_file', L, 'Aucun fichier envoyé') });
 
     await db.from('partners')
       .update({ id_document: req.file.path })
       .eq('user_id', req.user.id);
 
-    res.json({ url: req.file.path, message: 'Document uploadé' });
+    res.json({ url: req.file.path, message: await i18n.t('uploads_document_uploaded', L, 'Document uploadé') });
   })
 );
 
@@ -125,13 +149,14 @@ router.post('/document', authenticate,
 router.post('/partner-doc', authenticate,
   uploadDocument.single('document'),
   asyncHandler(async (req, res) => {
-    if (!req.file) return res.status(400).json({ error: 'Aucun fichier envoyé' });
+    const L = await _resolveLang(req);
+    if (!req.file) return res.status(400).json({ error: await i18n.t('uploads_error_no_file', L, 'Aucun fichier envoyé') });
 
     const validTypes = ['cni_recto', 'cni_verso', 'selfie', 'license_recto', 'license_verso'];
     const docType = req.body.type;
 
     if (!docType || !validTypes.includes(docType)) {
-      return res.status(400).json({ error: `Type invalide. Valeurs acceptées : ${validTypes.join(', ')}` });
+      return res.status(400).json({ error: await i18n.t('uploads_error_invalid_doc_type', L, 'Type invalide. Valeurs acceptées : {types}', { types: validTypes.join(', ') }) });
     }
 
     console.log(`[partner-doc] user=${req.user.id} type=${docType} url=${req.file.path}`);
@@ -139,7 +164,7 @@ router.post('/partner-doc', authenticate,
     res.json({
       url:  req.file.path,
       type: docType,
-      message: 'Document uploadé',
+      message: await i18n.t('uploads_document_uploaded', L, 'Document uploadé'),
     });
   })
 );
@@ -150,13 +175,14 @@ router.post('/partner-doc', authenticate,
 router.post('/avatar', authenticate,
   uploadAvatar.single('avatar'),
   asyncHandler(async (req, res) => {
-    if (!req.file) return res.status(400).json({ error: 'Aucune photo envoyée' });
+    const L = await _resolveLang(req);
+    if (!req.file) return res.status(400).json({ error: await i18n.t('uploads_error_no_photo', L, 'Aucune photo envoyée') });
 
     console.log(`[avatar] user=${req.user.id} url=${req.file.path}`);
 
     res.json({
       url:     req.file.path,
-      message: 'Photo de profil uploadée',
+      message: await i18n.t('uploads_avatar_uploaded', L, 'Photo de profil uploadée'),
     });
   })
 );

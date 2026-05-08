@@ -7,8 +7,21 @@ const express = require('express');
 const db      = require('../config/database');
 const { authenticate, optionalAuth } = require('../middleware/auth');
 const { asyncHandler }               = require('../middleware/errorHandler');
+const i18n    = require('../services/i18nService');
 
 const router = express.Router();
+
+// ✅ V14.5.3 i18n : helper langue
+// Routes auth (POST, DELETE) → req.user.id ; routes optionalAuth (GET) → fallback header
+async function _resolveLang(req) {
+  if (req.user?.id) {
+    try { return await i18n.getUserLang(req.user.id); } catch (e) {}
+  }
+  const accept = req.headers['accept-language'] || '';
+  const code = accept.split(',')[0]?.slice(0, 2).toLowerCase();
+  if (['fr', 'en', 'de'].includes(code)) return code;
+  return 'fr';
+}
 
 // ─── GET /api/reviews/by-service — Avis groupés par type d'annonce ──────────
 // V13.5 : permet au HomeScreen d'afficher des avis filtrés selon l'onglet actif
@@ -79,13 +92,15 @@ router.get('/listing/:id', optionalAuth, asyncHandler(async (req, res) => {
 // ─── POST /api/reviews — Créer un avis ───────────────────────────────────────
 router.post('/', authenticate, asyncHandler(async (req, res) => {
   const { listing_id, rating, comment } = req.body;
+  // ✅ V14.5.3 i18n : résoudre la langue de l'user
+  const L = await i18n.getUserLang(req.user.id);
 
   // Validation
-  if (!listing_id) return res.status(400).json({ error: 'listing_id requis' });
+  if (!listing_id) return res.status(400).json({ error: await i18n.t('reviews_error_listing_id_required', L, 'listing_id requis') });
   if (!rating || rating < 1 || rating > 5)
-    return res.status(400).json({ error: 'Note invalide (1-5)' });
+    return res.status(400).json({ error: await i18n.t('reviews_error_invalid_rating', L, 'Note invalide (1-5)') });
   if (!comment || comment.trim().length < 10)
-    return res.status(400).json({ error: 'Commentaire trop court (min. 10 caractères)' });
+    return res.status(400).json({ error: await i18n.t('reviews_error_comment_too_short', L, 'Commentaire trop court (min. 10 caractères)') });
 
   // ✅ V13.5.5 : récupérer le listing pour gérer le cas covoit (date + conducteur)
   const { data: listingMeta } = await db.from('listings')
@@ -96,12 +111,12 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   // ✅ V13.5.5 : pour covoit, le trajet doit être passé (depart_date < aujourd'hui)
   if (listingMeta?.type === 'cov') {
     if (!listingMeta.depart_date) {
-      return res.status(400).json({ error: 'Trajet sans date de départ.' });
+      return res.status(400).json({ error: await i18n.t('reviews_error_no_depart_date', L, 'Trajet sans date de départ.') });
     }
     const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
     if (String(listingMeta.depart_date).slice(0, 10) >= today) {
       return res.status(403).json({
-        error: 'Vous pourrez laisser un avis après la date du trajet.'
+        error: await i18n.t('reviews_error_trip_not_passed', L, 'Vous pourrez laisser un avis après la date du trajet.')
       });
     }
   }
@@ -117,7 +132,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
 
   if (!booking) {
     return res.status(403).json({
-      error: 'Vous devez avoir une réservation confirmée pour laisser un avis.'
+      error: await i18n.t('reviews_error_no_confirmed_booking', L, 'Vous devez avoir une réservation confirmée pour laisser un avis.')
     });
   }
 
@@ -129,7 +144,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     .single();
 
   if (existing) {
-    return res.status(409).json({ error: 'Vous avez déjà laissé un avis pour cette annonce.' });
+    return res.status(409).json({ error: await i18n.t('reviews_error_already_reviewed', L, 'Vous avez déjà laissé un avis pour cette annonce.') });
   }
 
   // ✅ V13.5.5 : pour covoit, l'avis cible aussi le conducteur (target_user_id)
@@ -162,24 +177,30 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
       .single();
 
     if (listing?.partners?.user_id) {
+      // ✅ V14.5.3 i18n : notif dans la langue du partenaire
+      const partnerLang = await i18n.getUserLang(listing.partners.user_id);
       await db.from('notifications').insert({
         user_id: listing.partners.user_id,
-        title:   '⭐ Nouvel avis reçu !',
-        body:    `${req.user.name} a laissé un avis ${rating}/5 sur "${listing.title}"`,
+        title:   await i18n.t('notif_new_review_title', partnerLang, '⭐ Nouvel avis reçu !'),
+        body:    await i18n.t('notif_new_review_body',  partnerLang, '{name} a laissé un avis {rating}/5 sur "{title}"', {
+          name: req.user.name, rating, title: listing.title,
+        }),
         type:    'review',
       });
     }
   } catch (e) { console.log('Review notif error:', e.message); }
 
-  res.status(201).json({ review, message: 'Avis publié avec succès.' });
+  res.status(201).json({ review, message: await i18n.t('reviews_published', L, 'Avis publié avec succès.') });
 }));
 
 // ─── DELETE /api/reviews/:id — Supprimer (admin) ─────────────────────────────
 router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
-  if (req.user.role !== 'admin') return res.status(403).json({ error: 'Non autorisé' });
+  // ✅ V14.5.3 i18n : résoudre la langue de l'admin
+  const L = await i18n.getUserLang(req.user.id);
+  if (req.user.role !== 'admin') return res.status(403).json({ error: await i18n.t('reviews_error_unauthorized', L, 'Non autorisé') });
 
   await db.from('reviews').update({ visible: false }).eq('id', req.params.id);
-  res.json({ message: 'Avis masqué.' });
+  res.json({ message: await i18n.t('reviews_hidden', L, 'Avis masqué.') });
 }));
 
 module.exports = router;

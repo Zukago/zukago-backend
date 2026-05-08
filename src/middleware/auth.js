@@ -1,12 +1,26 @@
 const jwt  = require('jsonwebtoken');
 const db   = require('../config/database');
+const i18n = require('../services/i18nService');
+
+// ✅ V14.5.3 i18n : helper pour résoudre la langue dans les middlewares
+// Fallback sur Accept-Language header si pas d'user identifié
+async function _resolveLang(req, userId) {
+  if (userId) {
+    try { return await i18n.getUserLang(userId); } catch (e) {}
+  }
+  const accept = req.headers['accept-language'] || '';
+  const code = accept.split(',')[0]?.slice(0, 2).toLowerCase();
+  if (['fr', 'en', 'de'].includes(code)) return code;
+  return 'fr';
+}
 
 // ── Vérifier token JWT
 const authenticate = async (req, res, next) => {
   try {
     const header = req.headers.authorization;
     if (!header || !header.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Token manquant' });
+      const L = await _resolveLang(req);
+      return res.status(401).json({ error: await i18n.t('auth_error_token_missing', L, 'Token manquant') });
     }
     const token = header.split(' ')[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -18,31 +32,41 @@ const authenticate = async (req, res, next) => {
       .eq('id', decoded.userId)
       .single();
 
-    if (error || !user) return res.status(401).json({ error: 'Utilisateur introuvable' });
-    if (!user.active)  return res.status(401).json({ error: 'Compte désactivé' });
+    if (error || !user) {
+      const L = await _resolveLang(req, decoded.userId);
+      return res.status(401).json({ error: await i18n.t('auth_error_user_not_found', L, 'Utilisateur introuvable') });
+    }
+    if (!user.active) {
+      const L = await _resolveLang(req, user.id);
+      return res.status(401).json({ error: await i18n.t('auth_error_account_disabled', L, 'Compte désactivé') });
+    }
 
     req.user = user;
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
-      return res.status(401).json({ error: 'Token expiré', code: 'TOKEN_EXPIRED' });
+      const L = await _resolveLang(req);
+      return res.status(401).json({ error: await i18n.t('auth_error_token_expired', L, 'Token expiré'), code: 'TOKEN_EXPIRED' });
     }
-    return res.status(401).json({ error: 'Token invalide' });
+    const L = await _resolveLang(req);
+    return res.status(401).json({ error: await i18n.t('auth_error_token_invalid', L, 'Token invalide') });
   }
 };
 
 // ── Vérifier rôle admin
-const requireAdmin = (req, res, next) => {
+const requireAdmin = async (req, res, next) => {
   if (req.user?.role !== 'admin') {
-    return res.status(403).json({ error: 'Accès refusé — Admin requis' });
+    const L = await _resolveLang(req, req.user?.id);
+    return res.status(403).json({ error: await i18n.t('auth_error_admin_required', L, 'Accès refusé — Admin requis') });
   }
   next();
 };
 
 // ── Vérifier rôle partenaire ou admin
-const requirePartner = (req, res, next) => {
+const requirePartner = async (req, res, next) => {
   if (!['partner', 'admin'].includes(req.user?.role)) {
-    return res.status(403).json({ error: 'Accès refusé — Partenaire requis' });
+    const L = await _resolveLang(req, req.user?.id);
+    return res.status(403).json({ error: await i18n.t('auth_error_partner_required', L, 'Accès refusé — Partenaire requis') });
   }
   next();
 };

@@ -9,8 +9,20 @@
 
 const express = require('express');
 const { asyncHandler } = require('../middleware/errorHandler');
+const i18n = require('../services/i18nService');
 
 const router = express.Router();
+
+// ✅ V14.5.3 i18n : helper langue (places.js routes non-auth)
+async function _resolveLang(req) {
+  const accept = req.headers['accept-language'] || '';
+  const code = accept.split(',')[0]?.slice(0, 2).toLowerCase();
+  if (['fr', 'en', 'de'].includes(code)) return code;
+  // Fallback : utiliser le param language= s'il est valide
+  const langParam = req.query.language?.slice(0, 2).toLowerCase();
+  if (['fr', 'en', 'de'].includes(langParam)) return langParam;
+  return 'fr';
+}
 
 const GOOGLE_API_KEY = process.env.GOOGLE_PLACES_API_KEY;
 
@@ -37,7 +49,8 @@ router.get('/autocomplete', asyncHandler(async (req, res) => {
   }
 
   if (!GOOGLE_API_KEY) {
-    return res.status(500).json({ error: 'Google Places API key manquante' });
+    const L = await _resolveLang(req);
+    return res.status(500).json({ error: await i18n.t('places_error_api_key_missing', L, 'Google Places API key manquante') });
   }
 
   const params = new URLSearchParams({
@@ -78,8 +91,14 @@ router.get('/autocomplete', asyncHandler(async (req, res) => {
 router.get('/details', asyncHandler(async (req, res) => {
   const { place_id, language = 'fr' } = req.query;
 
-  if (!place_id) return res.status(400).json({ error: 'place_id requis' });
-  if (!GOOGLE_API_KEY) return res.status(500).json({ error: 'Clé API manquante' });
+  if (!place_id) {
+    const L = await _resolveLang(req);
+    return res.status(400).json({ error: await i18n.t('places_error_place_id_required', L, 'place_id requis') });
+  }
+  if (!GOOGLE_API_KEY) {
+    const L = await _resolveLang(req);
+    return res.status(500).json({ error: await i18n.t('places_error_api_key_short', L, 'Clé API manquante') });
+  }
 
   const params = new URLSearchParams({
     place_id,
