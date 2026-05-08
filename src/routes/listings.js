@@ -4,8 +4,21 @@ const db = require('../config/database');
 const { authenticate, requireAdmin, requirePartner, optionalAuth } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
 const { deleteImage } = require('../config/cloudinary');
+const i18n = require('../services/i18nService');
 
 const router = express.Router();
+
+// ✅ V14.5.3 i18n : helper langue
+// Routes auth → req.user.id ; routes optionalAuth/publiques → fallback header
+async function _resolveLang(req) {
+  if (req.user?.id) {
+    try { return await i18n.getUserLang(req.user.id); } catch (e) {}
+  }
+  const accept = req.headers['accept-language'] || '';
+  const code = accept.split(',')[0]?.slice(0, 2).toLowerCase();
+  if (['fr', 'en', 'de'].includes(code)) return code;
+  return 'fr';
+}
 
 // ─── GET /api/listings — Liste publique ───────────────────────────────────────
 router.get('/', optionalAuth, asyncHandler(async (req, res) => {
@@ -72,7 +85,8 @@ router.get('/:id', optionalAuth, asyncHandler(async (req, res) => {
 
   if (error || !listing) {
     console.log('[GET /:id] Listing not found:', req.params.id, error?.message);
-    return res.status(404).json({ error: 'Annonce introuvable' });
+    const L = await _resolveLang(req);
+    return res.status(404).json({ error: await i18n.t('listings_error_not_found', L, 'Annonce introuvable') });
   }
 
   // 2) Photos (séparé, fallback [])
@@ -238,9 +252,13 @@ router.get('/:id/seats-available', asyncHandler(async (req, res) => {
   const { data: listing } = await db.from('listings')
     .select('seats_total, type').eq('id', req.params.id).single();
 
-  if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
+  if (!listing) {
+    const L = await _resolveLang(req);
+    return res.status(404).json({ error: await i18n.t('listings_error_not_found', L, 'Annonce introuvable') });
+  }
   if (listing.type !== 'cov') {
-    return res.status(400).json({ error: 'Cet endpoint est réservé aux trajets de covoiturage' });
+    const L = await _resolveLang(req);
+    return res.status(400).json({ error: await i18n.t('listings_error_carpool_only', L, 'Cet endpoint est réservé aux trajets de covoiturage') });
   }
 
   const seatsTotal = Number(listing.seats_total) || 0;
@@ -276,23 +294,33 @@ router.post('/', authenticate, requirePartner, [
   const errors = validationResult(req);
   if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
 
+  // ✅ V14.5.3 i18n : résoudre la langue de l'user (utilisée partout dans le handler)
+  const L = await i18n.getUserLang(req.user.id);
+
   // Récupérer partner_id — l'utilisateur DOIT être un partenaire approuvé
   const { data: partner } = await db.from('partners')
     .select('id, status').eq('user_id', req.user.id).single();
 
   if (!partner) {
     return res.status(403).json({
-      error: 'Vous devez soumettre une demande partenaire avant de publier',
+      error: await i18n.t('listings_error_no_partner_profile', L, 'Vous devez soumettre une demande partenaire avant de publier'),
       reason: 'no_partner_profile',
     });
   }
   if (partner.status !== 'approved') {
+    let errKey, errFr;
+    if (partner.status === 'pending') {
+      errKey = 'listings_error_partner_pending';
+      errFr  = 'Votre demande partenaire est en cours de vérification';
+    } else if (partner.status === 'rejected') {
+      errKey = 'listings_error_partner_rejected';
+      errFr  = 'Votre demande partenaire a été rejetée. Contactez le support.';
+    } else {
+      errKey = 'listings_error_partner_inactive';
+      errFr  = 'Votre compte partenaire n\'est pas actif';
+    }
     return res.status(403).json({
-      error: partner.status === 'pending'
-        ? 'Votre demande partenaire est en cours de vérification'
-        : partner.status === 'rejected'
-          ? 'Votre demande partenaire a été rejetée. Contactez le support.'
-          : 'Votre compte partenaire n\'est pas actif',
+      error: await i18n.t(errKey, L, errFr),
       reason: 'partner_not_approved',
       status: partner.status,
     });
@@ -343,10 +371,10 @@ router.post('/', authenticate, requirePartner, [
   // ═══════════════════════════════════════════════════════════════════
   if (type === 'cov') {
     if (!from_city || !to_city || !depart_date || !depart_time) {
-      return res.status(400).json({ error: 'Champs covoiturage manquants (from_city, to_city, depart_date, depart_time)' });
+      return res.status(400).json({ error: await i18n.t('listings_error_carpool_fields_missing', L, 'Champs covoiturage manquants (from_city, to_city, depart_date, depart_time)') });
     }
     if (!seats_total || seats_total < 1) {
-      return res.status(400).json({ error: 'seats_total invalide' });
+      return res.status(400).json({ error: await i18n.t('listings_error_invalid_seats', L, 'seats_total invalide') });
     }
 
     const { data: covListing, error: covError } = await db.from('listings').insert({
@@ -380,7 +408,7 @@ router.post('/', authenticate, requirePartner, [
 
     return res.status(201).json({
       listing: covListing,
-      message: 'Trajet covoiturage publié',
+      message: await i18n.t('listings_carpool_published', L, 'Trajet covoiturage publié'),
     });
   }
 
@@ -578,17 +606,18 @@ router.post('/', authenticate, requirePartner, [
     if (rtError) console.log('Room types insert error:', rtError.message);
   }
 
-  res.status(201).json({ listing, message: 'Annonce soumise pour approbation (24-48h)' });
+  res.status(201).json({ listing, message: await i18n.t('listings_submitted_for_approval', L, 'Annonce soumise pour approbation (24-48h)') });
 }));
 
 // ─── PATCH /api/listings/:id — Modifier annonce ───────────────────────────────
 router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
+  const L = await i18n.getUserLang(req.user.id);
   const { data: listing } = await db.from('listings').select('partner_id, partners(user_id)').eq('id', req.params.id).single();
-  if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
+  if (!listing) return res.status(404).json({ error: await i18n.t('listings_error_not_found', L, 'Annonce introuvable') });
 
   const isOwner = listing.partners?.user_id === req.user.id;
   const isAdmin = req.user.role === 'admin';
-  if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Non autorisé' });
+  if (!isOwner && !isAdmin) return res.status(403).json({ error: await i18n.t('listings_error_unauthorized', L, 'Non autorisé') });
 
   const { amenities, ...updates } = req.body;
   if (!isAdmin) delete updates.status; // partenaire ne peut pas changer le statut
@@ -615,15 +644,18 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
 
 // ─── DELETE /api/listings/:id — Supprimer ─────────────────────────────────────
 router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
+  // ✅ V14.5.3 i18n : résoudre la langue de l'user
+  const L = await i18n.getUserLang(req.user.id);
+
   const { data: listing } = await db.from('listings')
     .select('id, title, partner_id, partners(user_id)')
     .eq('id', req.params.id).single();
 
-  if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
+  if (!listing) return res.status(404).json({ error: await i18n.t('listings_error_not_found', L, 'Annonce introuvable') });
 
   const isOwner = listing.partners?.user_id === req.user.id;
   const isAdmin = req.user.role === 'admin';
-  if (!isOwner && !isAdmin) return res.status(403).json({ error: 'Non autorisé' });
+  if (!isOwner && !isAdmin) return res.status(403).json({ error: await i18n.t('listings_error_unauthorized', L, 'Non autorisé') });
 
   // ── Vérifier les réservations actives
   const { data: activeBookings } = await db.from('bookings')
@@ -637,10 +669,10 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
     // Réservations confirmées → seul l'admin peut forcer la suppression
     if (!isAdmin) {
       return res.status(409).json({
-        error: 'Suppression impossible',
+        error: await i18n.t('listings_error_cannot_delete', L, 'Suppression impossible'),
         reason: 'confirmed_bookings',
         count: confirmedBookings.length,
-        message: `Cette annonce a ${confirmedBookings.length} réservation(s) confirmée(s). Contactez l'administrateur ZUKAGO pour procéder à la suppression.`,
+        message: await i18n.t('listings_error_cannot_delete_message', L, 'Cette annonce a {count} réservation(s) confirmée(s). Contactez l\'administrateur ZUKAGO pour procéder à la suppression.', { count: confirmedBookings.length }),
       });
     }
 
@@ -656,15 +688,19 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
         .update({ status: 'cancelled' })
         .in('id', confirmedDetails.map(b => b.id));
 
-      // Notifier chaque client
-      await db.from('notifications').insert(
-        confirmedDetails.map(b => ({
-          user_id: b.user_id,
-          title:   'Réservation annulée',
-          body:    `Votre réservation confirmée pour "${listing.title}" a été annulée par l'administration ZUKAGO. Nous nous excusons pour ce désagrément.`,
-          type:    'info',
-        }))
+      // ✅ V14.5.3 i18n : notif multilingue à chaque client (broadcast)
+      const confirmedNotifs = await Promise.all(
+        confirmedDetails.map(async (b) => {
+          const clientLang = await i18n.getUserLang(b.user_id);
+          return {
+            user_id: b.user_id,
+            title:   await i18n.t('notif_booking_cancelled_title', clientLang, 'Réservation annulée'),
+            body:    await i18n.t('notif_booking_cancelled_admin_body', clientLang, 'Votre réservation confirmée pour "{title}" a été annulée par l\'administration ZUKAGO. Nous nous excusons pour ce désagrément.', { title: listing.title }),
+            type:    'info',
+          };
+        })
       );
+      await db.from('notifications').insert(confirmedNotifs);
     }
 
     // Notifier le partenaire
@@ -674,10 +710,14 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
         .eq('id', listing.partner_id)
         .single();
       if (partnerRow?.user_id) {
+        // ✅ V14.5.3 i18n : notif au partenaire dans sa langue
+        const partnerLang = await i18n.getUserLang(partnerRow.user_id);
         await db.from('notifications').insert({
           user_id: partnerRow.user_id,
-          title:   'Annonce supprimée par l\'administration',
-          body:    `Votre annonce "${listing.title}" a été supprimée par l'équipe ZUKAGO. ${confirmedBookings.length} réservation(s) confirmée(s) ont été annulées et les clients notifiés.`,
+          title:   await i18n.t('notif_listing_deleted_title', partnerLang, 'Annonce supprimée par l\'administration'),
+          body:    await i18n.t('notif_listing_deleted_body',  partnerLang, 'Votre annonce "{title}" a été supprimée par l\'équipe ZUKAGO. {count} réservation(s) confirmée(s) ont été annulées et les clients notifiés.', {
+            title: listing.title, count: confirmedBookings.length,
+          }),
           type:    'info',
         });
       }
@@ -697,14 +737,19 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
       .in('id', pendingBookings.map(b => b.id));
 
     if (pendingDetails?.length) {
-      await db.from('notifications').insert(
-        pendingDetails.map(b => ({
-          user_id: b.user_id,
-          title: 'Réservation annulée',
-          body: `Votre réservation pour "${listing.title}" a été annulée car l'annonce a été supprimée.`,
-          type: 'info',
-        }))
+      // ✅ V14.5.3 i18n : notif multilingue à chaque client (pending)
+      const pendingNotifs = await Promise.all(
+        pendingDetails.map(async (b) => {
+          const clientLang = await i18n.getUserLang(b.user_id);
+          return {
+            user_id: b.user_id,
+            title: await i18n.t('notif_booking_cancelled_title', clientLang, 'Réservation annulée'),
+            body:  await i18n.t('notif_booking_cancelled_listing_deleted_body', clientLang, 'Votre réservation pour "{title}" a été annulée car l\'annonce a été supprimée.', { title: listing.title }),
+            type:  'info',
+          };
+        })
       );
+      await db.from('notifications').insert(pendingNotifs);
     }
   }
 
@@ -732,7 +777,7 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
   if (error) throw new Error(error.message);
 
   console.log(`✅ Listing ${req.params.id} supprimé par ${req.user.id}`);
-  res.json({ message: 'Annonce supprimée définitivement', deleted: true });
+  res.json({ message: await i18n.t('listings_deleted_success', L, 'Annonce supprimée définitivement'), deleted: true });
 }));
 
 
@@ -755,14 +800,16 @@ router.get('/:id/room-types', asyncHandler(async (req, res) => {
 //          breakfast_included?, quantity, photos? (array URLs) }
 router.post('/:id/room-types', authenticate, asyncHandler(async (req, res) => {
   const listingId = req.params.id;
+  // ✅ V14.5.3 i18n : résoudre la langue
+  const L = await i18n.getUserLang(req.user.id);
 
   // Vérifier que le listing appartient à l'user (ou admin)
   const { data: listing } = await db.from('listings')
     .select('id, partner_id, partners(user_id)')
     .eq('id', listingId).single();
-  if (!listing) return res.status(404).json({ error: 'Annonce introuvable' });
+  if (!listing) return res.status(404).json({ error: await i18n.t('listings_error_not_found', L, 'Annonce introuvable') });
   if (req.user.role !== 'admin' && listing.partners?.user_id !== req.user.id) {
-    return res.status(403).json({ error: 'Non autorisé' });
+    return res.status(403).json({ error: await i18n.t('listings_error_unauthorized', L, 'Non autorisé') });
   }
 
   const {
@@ -771,7 +818,7 @@ router.post('/:id/room-types', authenticate, asyncHandler(async (req, res) => {
   } = req.body;
 
   if (!name || !price_night) {
-    return res.status(400).json({ error: 'name et price_night sont obligatoires' });
+    return res.status(400).json({ error: await i18n.t('listings_error_room_fields_required', L, 'name et price_night sont obligatoires') });
   }
 
   // Trouver le sort_order suivant si non fourni
@@ -801,13 +848,15 @@ router.post('/:id/room-types', authenticate, asyncHandler(async (req, res) => {
 
 // ─── PATCH /api/listings/room-types/:id — Modifier un type de chambre ───────
 router.patch('/room-types/:id', authenticate, asyncHandler(async (req, res) => {
+  // ✅ V14.5.3 i18n
+  const L = await i18n.getUserLang(req.user.id);
   // Vérifier ownership via le listing parent
   const { data: room } = await db.from('listing_room_types')
     .select('id, listing_id, listings!inner(partner_id, partners(user_id))')
     .eq('id', req.params.id).single();
-  if (!room) return res.status(404).json({ error: 'Type de chambre introuvable' });
+  if (!room) return res.status(404).json({ error: await i18n.t('listings_error_room_type_not_found', L, 'Type de chambre introuvable') });
   if (req.user.role !== 'admin' && room.listings?.partners?.user_id !== req.user.id) {
-    return res.status(403).json({ error: 'Non autorisé' });
+    return res.status(403).json({ error: await i18n.t('listings_error_unauthorized', L, 'Non autorisé') });
   }
 
   const allowed = [
@@ -839,12 +888,14 @@ router.patch('/room-types/:id', authenticate, asyncHandler(async (req, res) => {
 
 // ─── DELETE /api/listings/room-types/:id — Supprimer un type de chambre ─────
 router.delete('/room-types/:id', authenticate, asyncHandler(async (req, res) => {
+  // ✅ V14.5.3 i18n
+  const L = await i18n.getUserLang(req.user.id);
   const { data: room } = await db.from('listing_room_types')
     .select('id, listing_id, listings!inner(partner_id, partners(user_id))')
     .eq('id', req.params.id).single();
-  if (!room) return res.status(404).json({ error: 'Type de chambre introuvable' });
+  if (!room) return res.status(404).json({ error: await i18n.t('listings_error_room_type_not_found', L, 'Type de chambre introuvable') });
   if (req.user.role !== 'admin' && room.listings?.partners?.user_id !== req.user.id) {
-    return res.status(403).json({ error: 'Non autorisé' });
+    return res.status(403).json({ error: await i18n.t('listings_error_unauthorized', L, 'Non autorisé') });
   }
 
   const { error } = await db.from('listing_room_types').delete().eq('id', req.params.id);

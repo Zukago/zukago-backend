@@ -8,8 +8,23 @@ const commissionService = require('../services/commissionService');
 const statsService = require('../services/statsService');
 const { authenticate } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
+const i18n = require('../services/i18nService');
 
 const router = express.Router();
+
+// ✅ V14.5.3 i18n : helper langue
+// Routes auth (Stripe prepare/intent, CinetPay init, GET /booking/:id) → req.user.id
+// Webhooks (Stripe webhook, CinetPay notify) → fallback header (les webhooks viennent de
+// providers externes, pas d'user authentifié direct dans la requête)
+async function _resolveLang(req) {
+  if (req.user?.id) {
+    try { return await i18n.getUserLang(req.user.id); } catch (e) {}
+  }
+  const accept = req.headers['accept-language'] || '';
+  const code = accept.split(',')[0]?.slice(0, 2).toLowerCase();
+  if (['fr', 'en', 'de'].includes(code)) return code;
+  return 'fr';
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // V14.4 — checkOverlap helper (dupliqué de bookings.js pour /prepare)
@@ -92,8 +107,10 @@ router.post('/stripe/prepare', authenticate, asyncHandler(async (req, res) => {
     room_type_id, seats_booked, unit_type, unit_count,
     with_driver, zone, extras, pickup_time, pickup_location,
   } = req.body;
+  // ✅ V14.5.3 i18n : résoudre la langue de l'user
+  const L = await i18n.getUserLang(req.user.id);
 
-  if (!listing_id) return res.status(400).json({ error: 'listing_id requis' });
+  if (!listing_id) return res.status(400).json({ error: await i18n.t('payments_error_listing_id_required', L, 'listing_id requis') });
 
   // 1. Récupérer le listing
   const { data: listing } = await db.from('listings')
@@ -102,11 +119,14 @@ router.post('/stripe/prepare', authenticate, asyncHandler(async (req, res) => {
     .eq('status', 'active')
     .single();
 
-  if (!listing) return res.status(404).json({ error: 'Annonce introuvable ou inactive' });
+  if (!listing) return res.status(404).json({ error: await i18n.t('payments_error_listing_not_found', L, 'Annonce introuvable ou inactive') });
 
   // 2. Vérifier disponibilité
   const overlap = await checkOverlapPrepare(listing, req.body);
   if (overlap.conflict) {
+    // ✅ V14.5.3 : overlap.reason vient de checkOverlapPrepare (déjà en FR), on le passe tel quel
+    // Si on veut le traduire à terme, il faudra modifier checkOverlapPrepare. Pour l'instant on respecte
+    // le comportement existant (le reason est utilisé tel quel par le frontend qui peut afficher).
     return res.status(409).json({ error: overlap.reason });
   }
 
@@ -116,6 +136,7 @@ router.post('/stripe/prepare', authenticate, asyncHandler(async (req, res) => {
     const listingWithPartner = { ...listing, partner_id: listing.partners?.id };
     calc = await pricingService.calculate(listingWithPartner, req.body);
   } catch (e) {
+    // ✅ V14.5.3 : e.message vient de pricingService (technique), on le passe tel quel
     return res.status(400).json({ error: e.message });
   }
 
@@ -176,10 +197,12 @@ router.post('/stripe/prepare', authenticate, asyncHandler(async (req, res) => {
 // ─── POST /api/payments/stripe/intent — Créer paiement Stripe ────────────────
 router.post('/stripe/intent', authenticate, asyncHandler(async (req, res) => {
   const { booking_id } = req.body;
+  // ✅ V14.5.3 i18n
+  const L = await i18n.getUserLang(req.user.id);
 
   const { data: booking } = await db.from('bookings').select('*').eq('id', booking_id).single();
-  if (!booking) return res.status(404).json({ error: 'Réservation introuvable' });
-  if (booking.user_id !== req.user.id) return res.status(403).json({ error: 'Non autorisé' });
+  if (!booking) return res.status(404).json({ error: await i18n.t('payments_error_booking_not_found', L, 'Réservation introuvable') });
+  if (booking.user_id !== req.user.id) return res.status(403).json({ error: await i18n.t('payments_error_unauthorized', L, 'Non autorisé') });
 
   // Convertir FCFA en centimes EUR (Stripe utilise la plus petite unité)
   // 1 FCFA ≈ 0.00152 EUR → arrondi à 2 décimales
@@ -372,10 +395,13 @@ router.post('/stripe/webhook', async (req, res) => {
 
         if (partnerUserId) {
           try {
+            // ✅ V14.5.3 i18n : notif au partenaire dans sa langue
+            const partnerLang = await i18n.getUserLang(partnerUserId);
+            const dateRange = created.start_date ? ` ${await i18n.t('payments_notif_from_to', partnerLang, 'du {start} au {end}', { start: created.start_date, end: created.end_date })}` : '';
             await db.from('notifications').insert({
               user_id: partnerUserId,
-              title:   'Nouvelle réservation confirmée',
-              body:    `Une réservation a été confirmée pour "${listing.title}"${created.start_date ? ` du ${created.start_date} au ${created.end_date}` : ''}`,
+              title:   await i18n.t('notif_new_booking_confirmed_title', partnerLang, 'Nouvelle réservation confirmée'),
+              body:    await i18n.t('notif_new_booking_confirmed_body',  partnerLang, 'Une réservation a été confirmée pour "{title}"{dateRange}', { title: listing.title, dateRange }),
               type:    'booking',
             });
             console.log('[Stripe webhook V14.4] Notif partenaire OK');
@@ -446,10 +472,13 @@ router.post('/stripe/webhook', async (req, res) => {
         // 3. Notification partenaire (déplacée depuis POST /bookings)
         if (partnerUserId) {
           try {
+            // ✅ V14.5.3 i18n : notif au partenaire dans sa langue
+            const partnerLang = await i18n.getUserLang(partnerUserId);
+            const dateRange = updated.start_date ? ` ${await i18n.t('payments_notif_from_to', partnerLang, 'du {start} au {end}', { start: updated.start_date, end: updated.end_date })}` : '';
             await db.from('notifications').insert({
               user_id: partnerUserId,
-              title: 'Nouvelle réservation confirmée',
-              body: `Une réservation a été confirmée pour "${listing.title}"${updated.start_date ? ` du ${updated.start_date} au ${updated.end_date}` : ''}`,
+              title: await i18n.t('notif_new_booking_confirmed_title', partnerLang, 'Nouvelle réservation confirmée'),
+              body:  await i18n.t('notif_new_booking_confirmed_body',  partnerLang, 'Une réservation a été confirmée pour "{title}"{dateRange}', { title: listing.title, dateRange }),
               type: 'booking',
             });
           } catch(e) { console.log('[Stripe webhook] Notif error:', e.message); }
@@ -500,9 +529,11 @@ router.post('/stripe/webhook', async (req, res) => {
 // ─── POST /api/payments/cinetpay/init — Initier paiement CinetPay ────────────
 router.post('/cinetpay/init', authenticate, asyncHandler(async (req, res) => {
   const { booking_id, method } = req.body; // method: 'mtn' | 'orange'
+  // ✅ V14.5.3 i18n
+  const L = await i18n.getUserLang(req.user.id);
 
   const { data: booking } = await db.from('bookings').select('*').eq('id', booking_id).single();
-  if (!booking) return res.status(404).json({ error: 'Réservation introuvable' });
+  if (!booking) return res.status(404).json({ error: await i18n.t('payments_error_booking_not_found', L, 'Réservation introuvable') });
 
   const transactionId = `ZKG_${booking.code}_${Date.now()}`;
 
@@ -571,10 +602,13 @@ router.post('/cinetpay/notify', asyncHandler(async (req, res) => {
         // Notification partenaire
         if (partnerUserId) {
           try {
+            // ✅ V14.5.3 i18n : notif au partenaire dans sa langue
+            const partnerLang = await i18n.getUserLang(partnerUserId);
+            const dateRange = updated.start_date ? ` ${await i18n.t('payments_notif_from_to', partnerLang, 'du {start} au {end}', { start: updated.start_date, end: updated.end_date })}` : '';
             await db.from('notifications').insert({
               user_id: partnerUserId,
-              title: 'Nouvelle réservation confirmée',
-              body: `Une réservation a été confirmée pour "${listing.title}"${updated.start_date ? ` du ${updated.start_date} au ${updated.end_date}` : ''}`,
+              title: await i18n.t('notif_new_booking_confirmed_title', partnerLang, 'Nouvelle réservation confirmée'),
+              body:  await i18n.t('notif_new_booking_confirmed_body',  partnerLang, 'Une réservation a été confirmée pour "{title}"{dateRange}', { title: listing.title, dateRange }),
               type: 'booking',
             });
           } catch(e) { console.log('[CinetPay notify] Notif error:', e.message); }

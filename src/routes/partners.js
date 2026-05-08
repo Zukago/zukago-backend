@@ -3,15 +3,31 @@ const db = require('../config/database');
 const { authenticate, requirePartner } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
 const commissionService = require('../services/commissionService');
+const i18n = require('../services/i18nService');
 
 const router = express.Router();
+
+// ✅ V14.5.3 i18n : helper langue
+// Routes auth → req.user.id ; route publique /public/:user_id → fallback header
+async function _resolveLang(req) {
+  if (req.user?.id) {
+    try { return await i18n.getUserLang(req.user.id); } catch (e) {}
+  }
+  const accept = req.headers['accept-language'] || '';
+  const code = accept.split(',')[0]?.slice(0, 2).toLowerCase();
+  if (['fr', 'en', 'de'].includes(code)) return code;
+  return 'fr';
+}
 
 // ─── GET /api/partners/me — Mon profil partenaire ────────────────────────────
 router.get('/me', authenticate, asyncHandler(async (req, res) => {
   const { data: partner } = await db.from('partners')
     .select('*, users!partners_user_id_fkey(name, email, avatar, phone, whatsapp)')
     .eq('user_id', req.user.id).single();
-  if (!partner) return res.status(404).json({ error: 'Profil partenaire introuvable' });
+  if (!partner) {
+    const L = await _resolveLang(req);
+    return res.status(404).json({ error: await i18n.t('partners_error_profile_not_found', L, 'Profil partenaire introuvable') });
+  }
   res.json({ partner });
 }));
 
@@ -21,7 +37,10 @@ router.get('/me', authenticate, asyncHandler(async (req, res) => {
 // Toutes les stats (note moyenne, nb trajets, nb avis) sont calculées dynamiquement
 router.get('/public/:user_id', asyncHandler(async (req, res) => {
   const userId = req.params.user_id;
-  if (!userId) return res.status(400).json({ error: 'user_id requis' });
+  if (!userId) {
+    const L = await _resolveLang(req);
+    return res.status(400).json({ error: await i18n.t('partners_error_user_id_required', L, 'user_id requis') });
+  }
 
   // 1. Données utilisateur (publiques uniquement)
   const { data: userRow } = await db.from('users')
@@ -29,7 +48,10 @@ router.get('/public/:user_id', asyncHandler(async (req, res) => {
     .eq('id', userId)
     .maybeSingle();
 
-  if (!userRow) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  if (!userRow) {
+    const L = await _resolveLang(req);
+    return res.status(404).json({ error: await i18n.t('partners_error_user_not_found', L, 'Utilisateur introuvable') });
+  }
 
   // 2. Données partenaire (filtrer les sensibles)
   const { data: partnerRow } = await db.from('partners')
@@ -287,16 +309,17 @@ router.get('/bookings', authenticate, asyncHandler(async (req, res) => {
 // ─── POST /api/partners/withdraw — Demander un retrait ───────────────────────
 router.post('/withdraw', authenticate, requirePartner, asyncHandler(async (req, res) => {
   const { amount, method, account } = req.body;
-  if (!amount || amount <= 0) return res.status(400).json({ error: 'Montant invalide' });
+  const L = await _resolveLang(req);
+  if (!amount || amount <= 0) return res.status(400).json({ error: await i18n.t('partners_error_invalid_amount', L, 'Montant invalide') });
 
   const { data: partner } = await db.from('partners').select('id, solde').eq('user_id', req.user.id).single();
-  if (Number(partner.solde) < amount) return res.status(400).json({ error: `Solde insuffisant (${partner.solde} FCFA)` });
+  if (Number(partner.solde) < amount) return res.status(400).json({ error: await i18n.t('partners_error_insufficient_balance', L, 'Solde insuffisant ({balance} FCFA)', { balance: partner.solde }) });
 
   const { data: withdrawal } = await db.from('withdrawals').insert({
     partner_id: partner.id, amount, method, account,
   }).select().single();
 
-  res.status(201).json({ withdrawal, message: 'Demande de retrait soumise. Traitement sous 48h.' });
+  res.status(201).json({ withdrawal, message: await i18n.t('partners_withdraw_submitted', L, 'Demande de retrait soumise. Traitement sous 48h.') });
 }));
 
 
@@ -322,21 +345,23 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
     // ✅ V12 KYC : permis (optionnel — requis si pub voiture/chauffeur/covoit)
     license_category, license_obtained, license_recto_url, license_verso_url,
   } = req.body;
+  // ✅ V14.5.3 i18n : résoudre la langue de l'user
+  const L = await i18n.getUserLang(req.user.id);
 
-  if (!cni_number) return res.status(400).json({ error: 'Numéro CNI requis' });
-  if (!whatsapp)   return res.status(400).json({ error: 'WhatsApp requis' });
-  if (!address)    return res.status(400).json({ error: 'Adresse requise' });
+  if (!cni_number) return res.status(400).json({ error: await i18n.t('partners_error_cni_required', L, 'Numéro CNI requis') });
+  if (!whatsapp)   return res.status(400).json({ error: await i18n.t('partners_error_whatsapp_required', L, 'WhatsApp requis') });
+  if (!address)    return res.status(400).json({ error: await i18n.t('partners_error_address_required', L, 'Adresse requise') });
 
   // ✅ V12 KYC : photos CNI obligatoires
-  if (!cni_recto_url) return res.status(400).json({ error: 'Photo recto de la pièce d\'identité requise' });
-  if (!selfie_url)    return res.status(400).json({ error: 'Selfie requis pour vérification' });
+  if (!cni_recto_url) return res.status(400).json({ error: await i18n.t('partners_error_cni_recto_required', L, 'Photo recto de la pièce d\'identité requise') });
+  if (!selfie_url)    return res.status(400).json({ error: await i18n.t('partners_error_selfie_required', L, 'Selfie requis pour vérification') });
 
   // ✅ V12 : si l'user remplit le permis, vérifier cohérence (pas de demi-permis)
   const hasAnyLicenseField = license_category || license_obtained || license_recto_url || license_verso_url;
   if (hasAnyLicenseField) {
     if (!license_category || !license_obtained || !license_recto_url || !license_verso_url) {
       return res.status(400).json({
-        error: 'Pour ajouter votre permis, tous les champs sont requis : catégorie, date, recto, verso',
+        error: await i18n.t('partners_error_license_incomplete', L, 'Pour ajouter votre permis, tous les champs sont requis : catégorie, date, recto, verso'),
       });
     }
   }
@@ -347,11 +372,11 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
   const { data: userRow } = await db.from('users')
     .select('id, role, verified, demande_verified').eq('id', req.user.id).maybeSingle();
 
-  if (!userRow) return res.status(404).json({ error: 'Utilisateur introuvable' });
+  if (!userRow) return res.status(404).json({ error: await i18n.t('partners_error_user_not_found', L, 'Utilisateur introuvable') });
 
   // Si déjà validé par admin → rien à faire
   if (userRow.verified === true) {
-    return res.status(409).json({ error: 'Votre compte partenaire est deja approuve' });
+    return res.status(409).json({ error: await i18n.t('partners_error_already_approved', L, 'Votre compte partenaire est deja approuve') });
   }
 
   // Vérifier si demande déjà existante
@@ -402,8 +427,8 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
 
   if (partnerSaveError) {
     return res.status(500).json({
-      error:   'Impossible de sauvegarder la demande : ' + partnerSaveError.message,
-      details: 'Colonne manquante ou contrainte DB. Contactez le support.',
+      error:   await i18n.t('partners_error_save_failed', L, 'Impossible de sauvegarder la demande : {detail}', { detail: partnerSaveError.message }),
+      details: await i18n.t('partners_error_save_details', L, 'Colonne manquante ou contrainte DB. Contactez le support.'),
     });
   }
 
@@ -412,7 +437,7 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
     .update({ demande_verified: true }).eq('id', req.user.id);
   if (updErr) {
     console.error(`[Partners] UPDATE user error: ${updErr.message}`);
-    return res.status(500).json({ error: 'Erreur MAJ user : ' + updErr.message });
+    return res.status(500).json({ error: await i18n.t('partners_error_update_user', L, 'Erreur MAJ user : {detail}', { detail: updErr.message }) });
   }
   console.log(`[Partners] ✅ User ${req.user.email} : demande_verified=true (role inchangé: ${userRow.role})`);
 
@@ -422,35 +447,48 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
 
   if (admins?.length) {
     try {
-      await db.from('notifications').insert(
-        admins.map(a => ({
-          user_id: a.id,
-          title:   'Nouvelle demande partenaire',
-          body:    `${req.user.name || 'Un utilisateur'} a soumis une demande partenaire (${type || 'proprietaire'}).`,
-          type:    'partner',
-        }))
+      // ✅ V14.5.3 i18n : chaque admin reçoit la notif dans sa langue
+      const userName = req.user.name || null;
+      const requestType = type || null;
+      const notifs = await Promise.all(
+        admins.map(async (a) => {
+          const adminLang = await i18n.getUserLang(a.id);
+          const userNameTranslated = userName || await i18n.t('partners_a_user', adminLang, 'Un utilisateur');
+          const typeTranslated = requestType || await i18n.t('partners_default_type', adminLang, 'proprietaire');
+          return {
+            user_id: a.id,
+            title:   await i18n.t('notif_new_partner_request_title', adminLang, 'Nouvelle demande partenaire'),
+            body:    await i18n.t('notif_new_partner_request_body',  adminLang, '{name} a soumis une demande partenaire ({type}).', {
+              name: userNameTranslated, type: typeTranslated,
+            }),
+            type:    'partner',
+          };
+        })
       );
+      await db.from('notifications').insert(notifs);
       console.log(`[Partners] ✅ ${admins.length} admin notifications sent`);
     } catch(e) { console.log(`[Partners] admin notif error: ${e.message}`); }
   }
 
   console.log(`[Partners] ✅ DONE - Request submitted by ${req.user.email}`);
-  res.json({ message: 'Demande soumise avec succès. Vérification sous 24-48h.' });
+  res.json({ message: await i18n.t('partners_request_submitted', L, 'Demande soumise avec succès. Vérification sous 24-48h.') });
 }));
 
 // ✅ V12 : POST /api/partners/license — Ajouter le permis APRÈS soumission (pour user déjà partenaire)
 router.post('/license', authenticate, asyncHandler(async (req, res) => {
   const { license_category, license_obtained, license_recto_url, license_verso_url } = req.body;
+  // ✅ V14.5.3 i18n : résoudre la langue de l'user
+  const L = await i18n.getUserLang(req.user.id);
 
   if (!license_category || !license_obtained || !license_recto_url || !license_verso_url) {
     return res.status(400).json({
-      error: 'Tous les champs permis requis : catégorie, date, recto, verso',
+      error: await i18n.t('partners_error_license_fields_required', L, 'Tous les champs permis requis : catégorie, date, recto, verso'),
     });
   }
 
   const { data: partner } = await db.from('partners')
     .select('id').eq('user_id', req.user.id).maybeSingle();
-  if (!partner) return res.status(404).json({ error: 'Profil partenaire introuvable' });
+  if (!partner) return res.status(404).json({ error: await i18n.t('partners_error_profile_not_found', L, 'Profil partenaire introuvable') });
 
   const { error } = await db.from('partners').update({
     license_category,
@@ -463,7 +501,7 @@ router.post('/license', authenticate, asyncHandler(async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
 
   console.log(`[Partners] ✅ Permis ajouté/mis à jour par ${req.user.email}`);
-  res.json({ message: 'Permis enregistré. Vérification par notre équipe sous 24-48h.' });
+  res.json({ message: await i18n.t('partners_license_registered', L, 'Permis enregistré. Vérification par notre équipe sous 24-48h.') });
 }));
 
 module.exports = router;
