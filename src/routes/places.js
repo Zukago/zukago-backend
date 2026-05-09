@@ -183,4 +183,78 @@ router.get('/details', asyncHandler(async (req, res) => {
   });
 }));
 
+// ─── GET /api/places/reverse-geocode?lat=X&lng=Y ─────────────────────────────
+// ✅ V14.5.4 : Reverse geocoding — coords (lat/lng) → adresse + city + quartier
+//              Utilisé quand l'user déplace le pin sur la carte (Step3Location)
+//              ou utilise sa position GPS actuelle ("Ma position").
+//              Renvoie le MÊME format que /details pour cohérence frontend.
+router.get('/reverse-geocode', asyncHandler(async (req, res) => {
+  const { lat, lng, language = 'fr' } = req.query;
+
+  if (!lat || !lng) {
+    const L = await _resolveLang(req);
+    return res.status(400).json({ error: await i18n.t('places_error_coords_required', L, 'lat et lng requis') });
+  }
+  if (!GOOGLE_API_KEY) {
+    const L = await _resolveLang(req);
+    return res.status(500).json({ error: await i18n.t('places_error_api_key_short', L, 'Clé API manquante') });
+  }
+
+  const params = new URLSearchParams({
+    latlng: `${lat},${lng}`,
+    language,
+    key:    GOOGLE_API_KEY,
+  });
+
+  const url  = `https://maps.googleapis.com/maps/api/geocode/json?${params}`;
+  const resp = await fetch(url);
+  const data = await resp.json();
+
+  if (data.status !== 'OK' || !data.results || data.results.length === 0) {
+    return res.json({ result: null });
+  }
+
+  // ✅ Stratégie de sélection :
+  //    Le 1er résultat de reverseGeocode est généralement le plus précis (rue/numéro).
+  //    Mais on combine TOUS les results pour extraire ville + quartier au mieux,
+  //    car parfois locality est dans un result ≠ que sublocality.
+  const allComponents = data.results
+    .flatMap(r => r.address_components || []);
+
+  // Helper : récupère le premier component matchant un des types donnés
+  // (parmi tous les results combinés)
+  const getComponent = (types) => {
+    const comp = allComponents.find(c =>
+      types.some(t => c.types.includes(t))
+    );
+    return comp?.long_name || '';
+  };
+
+  // ✅ V14.5.4 : MÊME logique d'extraction que /details (cohérence garantie)
+  const neighborhood = getComponent([
+    'sublocality_level_1',
+    'sublocality',
+    'neighborhood',
+  ]);
+
+  const city = getComponent(['locality'])
+    || getComponent(['administrative_area_level_2'])
+    || getComponent(['administrative_area_level_1']);
+
+  const country = getComponent(['country']);
+
+  // Adresse formatée la plus précise (1er result = le plus proche du point)
+  const formattedAddress = data.results[0].formatted_address || '';
+
+  res.json({
+    result: {
+      formatted_address: formattedAddress,
+      city,                                    // Ex: "Douala"
+      neighborhood,                            // Ex: "Bonamoussadi"  (peut être vide)
+      country,                                 // Ex: "Cameroun"
+      coords: { lat: parseFloat(lat), lng: parseFloat(lng), latitude: parseFloat(lat), longitude: parseFloat(lng) },
+    },
+  });
+}));
+
 module.exports = router;
