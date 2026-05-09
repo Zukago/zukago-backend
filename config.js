@@ -45,7 +45,7 @@ router.get('/app', asyncHandler(async (req, res) => {
     db.from('translations').select('key, value').eq('lang', lang),
     // ✅ NOUVEAU V6 : 2 nouvelles queries
     db.from('how_it_works_by_service').select('*').eq('lang', lang).order('service_code').order('step_order'),
-    db.from('partner_section_by_service').select('*').eq('lang', lang),
+    db.from('partner_section_by_service').select('*'),  // ✅ V14.5.3 i18n : pas de filtre lang (multi-colonnes _fr/_en/_de)
     // ✅ NOUVEAU V8 : équipements par service
     db.from('amenities_by_service').select('*').eq('lang', lang).order('service_code').order('sort_order'),
   ]);
@@ -75,6 +75,100 @@ router.get('/app', asyncHandler(async (req, res) => {
       const translated = translationsMap[key];
       return translated ? { ...row, [labelField]: translated } : row;
     });
+  };
+
+  // ✅ V14.5.3 i18n : helper pour traduire UN champ spécifique d'un objet
+  // Utilisé pour les rows uniques (partner_section) ou avec champs multiples (how_it_works)
+  const tDb = (key, fallback) => translationsMap[key] || fallback;
+
+  // ✅ V14.5.3 i18n : traduire how_it_works (table simple, fallback)
+  // ⚠️ Cette table a des colonnes natives multilingues : title_fr, title_en, desc_fr, desc_en
+  // (pas de _de — fallback via translations table avec key how_step{N}_title/desc)
+  // Le frontend HomeScreen utilise row.title et row.desc → on les remplit selon la lang.
+  //
+  // ⚠️ DB ZUKAGO : step_num est TEXT avec zéro-padding ("01", "02", "03", "04")
+  // → On essaye 2 versions de key : how_step01_title ET how_step1_title pour matcher
+  const i18nHowItWorks = (rows) => {
+    if (!Array.isArray(rows)) return rows;
+    return rows.map(row => {
+      // Étape 1 : essayer les colonnes natives _${lang}
+      const nativeTitle = row[`title_${lang}`];
+      const nativeDesc  = row[`desc_${lang}`];
+      // Étape 2 : fallback translations (utile pour DE qui n'existe pas en colonne)
+      // Tester step_num original ET sans zéro-padding (parseInt) pour être robuste
+      const stepRaw = row.step_num || row.sort_order;
+      const stepInt = parseInt(stepRaw, 10);
+      let trTitle = null, trDesc = null;
+      if (stepRaw) {
+        trTitle = translationsMap[`how_step${stepRaw}_title`] || (stepInt ? translationsMap[`how_step${stepInt}_title`] : null);
+        trDesc  = translationsMap[`how_step${stepRaw}_desc`]  || (stepInt ? translationsMap[`how_step${stepInt}_desc`]  : null);
+      }
+      // Étape 3 : fallback FR (la valeur originale)
+      return {
+        ...row,
+        title: nativeTitle || trTitle || row.title_fr || row.title,
+        desc:  nativeDesc  || trDesc  || row.desc_fr  || row.desc,
+      };
+    });
+  };
+
+  // ✅ V14.5.3 i18n : traduire partner_section (single row, fallback statique)
+  // ⚠️ Colonnes natives : title_fr, title_en, subtitle_fr, subtitle_en, cta_label_fr, cta_label_en
+  // (features est jsonb FR uniquement → traduit via translations key partner_section_features)
+  const i18nPartnerSection = (section) => {
+    if (!section) return section;
+    const row = Array.isArray(section) ? section[0] : section;
+    if (!row) return section;
+    // Features peut être JSON array natif (jsonb) ou string à parser
+    let translatedFeatures = Array.isArray(row.features)
+      ? row.features
+      : (typeof row.features === 'string' ? (() => {
+          try { return JSON.parse(row.features); } catch { return []; }
+        })() : []);
+    const featuresKey = translationsMap['partner_section_features'];
+    if (featuresKey) {
+      try {
+        translatedFeatures = typeof featuresKey === 'string' ? JSON.parse(featuresKey) : featuresKey;
+      } catch (e) { /* fallback to original */ }
+    }
+    return {
+      ...row,
+      title:    row[`title_${lang}`]    || translationsMap['partner_section_title']    || row.title_fr    || row.title,
+      subtitle: row[`subtitle_${lang}`] || translationsMap['partner_section_subtitle'] || row.subtitle_fr || row.subtitle,
+      ctaLabel: row[`cta_label_${lang}`] || translationsMap['partner_section_cta']     || row.cta_label_fr || row.ctaLabel,
+      cta_label: row[`cta_label_${lang}`] || translationsMap['partner_section_cta']    || row.cta_label_fr || row.cta_label,
+      ctaEnabled: row.cta_enabled !== undefined ? row.cta_enabled : (row.ctaEnabled !== undefined ? row.ctaEnabled : true),
+      features: translatedFeatures,
+    };
+  };
+
+  // ✅ V14.5.3 i18n : traduire promo_banners
+  // ⚠️ Cette table n'a qu'une colonne `text` (pas multilingue native)
+  // Traduction via translations avec key promo_banner_${id}_text
+  const i18nPromoBanners = (rows) => {
+    if (!Array.isArray(rows)) return rows;
+    return rows.map(row => {
+      if (!row.id) return row;
+      return {
+        ...row,
+        text: translationsMap[`promo_banner_${row.id}_text`] || row.text,
+      };
+    });
+  };
+
+  // ✅ V14.5.3 i18n : traduire les valeurs string de appConfig
+  // Pour chaque key qui a une string traduisible (ex: slogan_sub) :
+  // si translations a `app_config_${key}` → on remplace
+  const i18nAppConfig = (cfg) => {
+    if (!cfg || typeof cfg !== 'object') return cfg;
+    const out = { ...cfg };
+    for (const k of Object.keys(out)) {
+      const v = out[k];
+      if (typeof v !== 'string') continue;
+      const translated = translationsMap[`app_config_${k}`];
+      if (translated) out[k] = translated;
+    }
+    return out;
   };
 
   // Quartiers par ville
@@ -108,16 +202,30 @@ router.get('/app', asyncHandler(async (req, res) => {
   }
 
   // ✅ NOUVEAU V6 : Transformer en objet { apt: {...}, hotel: {...}, ... }
+  // ✅ V14.5.3 i18n : la table a maintenant des colonnes _fr/_en/_de
+  // → on lit la bonne colonne selon `lang`, avec fallback _fr puis sur la valeur native
   const partnerSectionByService = {};
   for (const row of partnerSectionByServiceRaw || []) {
+    const pickField = (base) => {
+      // Priorité : colonne _${lang} → colonne _fr → colonne native (legacy)
+      return row[`${base}_${lang}`] || row[`${base}_fr`] || row[base];
+    };
+    const pickPerks = () => {
+      const raw = row[`perks_${lang}`] || row.perks_fr || row.perks;
+      if (Array.isArray(raw)) return raw;
+      if (typeof raw === 'string') {
+        try { return JSON.parse(raw); } catch { return []; }
+      }
+      return [];
+    };
     partnerSectionByService[row.service_code] = {
-      tag:         row.tag,
-      title:       row.title,
-      description: row.description,
-      stat_num:    row.stat_num,
-      stat_txt:    row.stat_txt,
-      perks:       Array.isArray(row.perks) ? row.perks : (typeof row.perks === 'string' ? JSON.parse(row.perks) : []),
-      cta_label:   row.cta_label,
+      tag:         pickField('tag'),
+      title:       pickField('title'),
+      description: pickField('description'),
+      stat_num:    row.stat_num,                  // numérique → pas de traduction
+      stat_txt:    pickField('stat_txt'),
+      perks:       pickPerks(),
+      cta_label:   pickField('cta_label'),
     };
   }
 
@@ -148,8 +256,20 @@ router.get('/app', asyncHandler(async (req, res) => {
   const i18nNavTabs        = applyI18n(navTabs,        'nav');
   const i18nProfileMenu    = applyI18n(profileMenu,    'profile_menu');
 
+  // ✅ V14.5.3 i18n : nouveaux helpers pour les sections "rich content"
+  // Keys attendues :
+  //   how_step1_title, how_step1_desc, how_step2_title, ...
+  //   partner_section_title, partner_section_subtitle, partner_section_cta,
+  //     partner_section_features (JSON array stringified)
+  //   promo_banner_${id}_text, promo_banner_${id}_sub
+  //   app_config_${key} pour chaque entrée de appConfig à traduire
+  const i18nedHowItWorks    = i18nHowItWorks(howItWorks);
+  const i18nedPartnerSection = i18nPartnerSection(partnerSection?.[0] || partnerSection);
+  const i18nedPromoBanners  = i18nPromoBanners(promoBanners);
+  const i18nedAppConfig     = i18nAppConfig(appConfig);
+
   res.json({
-    appConfig,
+    appConfig:      i18nedAppConfig,
     services:       i18nServices,
     cities:         i18nCities,
     amenities:      i18nAmenities,
@@ -158,9 +278,9 @@ router.get('/app', asyncHandler(async (req, res) => {
     currencies,
     navTabs:        i18nNavTabs,
     profileMenu:    i18nProfileMenu,
-    howItWorks,
-    partnerSection: partnerSection?.[0] || partnerSection,
-    promoBanners,
+    howItWorks:     i18nedHowItWorks,
+    partnerSection: i18nedPartnerSection,
+    promoBanners:   i18nedPromoBanners,
     translations: translationsMap,
     allQuartiers: quartiersMap,
     aptTypes,
