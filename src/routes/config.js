@@ -42,7 +42,10 @@ router.get('/app', asyncHandler(async (req, res) => {
     db.from('how_it_works').select('*').order('sort_order'),
     db.from('partner_section').select('*').single(),
     db.from('promo_banners').select('*').eq('enabled', true).order('sort_order'),
-    db.from('translations').select('key, value').eq('lang', lang),
+    // ✅ V14.5.3 PHASE 3 FIX : Supabase tronque à 1000 rows par défaut !
+    // → Avec 2036+ keys par langue, on perdait les 1000+ premières keys (profile_*, search_*, etc.)
+    // → .limit(10000) pour récupérer TOUTES les translations
+    db.from('translations').select('key, value').eq('lang', lang).limit(10000),
     // ✅ NOUVEAU V6 : 2 nouvelles queries
     db.from('how_it_works_by_service').select('*').eq('lang', lang).order('service_code').order('step_order'),
     db.from('partner_section_by_service').select('*'),  // ✅ V14.5.3 i18n : pas de filtre lang (multi-colonnes _fr/_en/_de)
