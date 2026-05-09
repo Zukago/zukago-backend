@@ -364,6 +364,9 @@ router.post('/', authenticate, requirePartner, [
     from_city, to_city, via_cities, depart_date, depart_time,
     seats_total, seats_available, car_model, car_color, plate_number,
     smoking_ok, music_ok, pets_ok, luggage, status,
+
+    // ✅ V14.5.4 : Géolocalisation (Google Places autocomplete + future map)
+    latitude, longitude,
   } = req.body;
 
   // ═══════════════════════════════════════════════════════════════════
@@ -402,6 +405,9 @@ router.post('/', authenticate, requirePartner, [
       pets_ok:          pets_ok    !== undefined ? !!pets_ok    : false,
       luggage:          luggage    || 'medium',
       cancel_policy:    cancel_policy || null,
+      // ✅ V14.5.4 : Géolocalisation (covoiturage = point de départ)
+      latitude:         latitude  || null,
+      longitude:        longitude || null,
     }).select().single();
 
     if (covError) throw new Error(covError.message);
@@ -484,6 +490,9 @@ router.post('/', authenticate, requirePartner, [
     cancel_policy: cancel_policy || null,
     check_in_time: check_in_time || null,
     check_out_time: check_out_time || null,
+    // ✅ V14.5.4 : Géolocalisation (Google Places autocomplete + future map)
+    latitude:  latitude  || null,
+    longitude: longitude || null,
   };
 
   // ── APT / HOTEL : caractéristiques communes ──
