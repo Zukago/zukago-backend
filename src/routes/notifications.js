@@ -35,12 +35,13 @@ router.post('/register-token', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // ─── GET /api/notifications ───────────────────────────────────────────────────
+// ✅ V14.5.4 FIX : suppression du filtre 'target' et 'deleted' (colonnes
+//                  inexistantes en DB qui faisaient renvoyer un array vide).
+//                  La DB notifications a juste : id, user_id, title, body, type, read, created_at
 router.get('/', authenticate, asyncHandler(async (req, res) => {
   const { data: notifications } = await db.from('notifications')
     .select('*')
-    .or(`user_id.eq.${req.user.id},target.eq.all,target.eq.${req.user.role}s`)
-    // Ne retourner QUE les non supprimées (colonne deleted, default false)
-    .neq('deleted', true)
+    .eq('user_id', req.user.id)
     .order('created_at', { ascending: false })
     .limit(50);
 
@@ -64,30 +65,15 @@ router.patch('/read-all', authenticate, asyncHandler(async (req, res) => {
 }));
 
 // ─── DELETE /api/notifications/:id — Supprimer une notification ───────────────
-// Soft delete : on marque deleted=true plutôt que de supprimer la ligne
-// (les notifications broadcast target=all ne peuvent pas être supprimées physiquement
-//  car elles appartiennent à user_id=null — on les cache côté user)
+// ✅ V14.5.4 FIX : DELETE physique uniquement (la colonne 'deleted' n'existe
+//                  pas en DB, on supprime vraiment la ligne).
 router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
   const { id } = req.params;
 
-  // Essayer d'abord un vrai delete (notifications personnelles)
-  const { error: delErr } = await db.from('notifications')
+  await db.from('notifications')
     .delete()
     .eq('id', id)
     .eq('user_id', req.user.id);
-
-  if (delErr) {
-    // Fallback : soft-delete via colonne deleted (notifications broadcast)
-    // On insère une ligne dans user_notification_hidden si elle existe,
-    // sinon on update directement
-    try {
-      await db.from('notifications')
-        .update({ deleted: true })
-        .eq('id', id);
-    } catch (e) {
-      console.log('soft delete fallback:', e.message);
-    }
-  }
 
   res.json({ message: 'Notification supprimée' });
 }));
