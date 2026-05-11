@@ -5,6 +5,8 @@ const { authenticate, requireAdmin, requirePartner, optionalAuth } = require('..
 const { asyncHandler } = require('../middleware/errorHandler');
 const { deleteImage } = require('../config/cloudinary');
 const i18n = require('../services/i18nService');
+// ✅ V14.5.4 : Helper centralisé notification (DB insert + push Expo)
+const { notifyUser } = require('../services/notifyUser');
 
 const router = express.Router();
 
@@ -698,18 +700,18 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
         .in('id', confirmedDetails.map(b => b.id));
 
       // ✅ V14.5.3 i18n : notif multilingue à chaque client (broadcast)
-      const confirmedNotifs = await Promise.all(
+      // ✅ V14.5.4 : notifyUser() par client (langues différentes — pas de batch)
+      await Promise.all(
         confirmedDetails.map(async (b) => {
           const clientLang = await i18n.getUserLang(b.user_id);
-          return {
-            user_id: b.user_id,
-            title:   await i18n.t('notif_booking_cancelled_title', clientLang, 'Réservation annulée'),
-            body:    await i18n.t('notif_booking_cancelled_admin_body', clientLang, 'Votre réservation confirmée pour "{title}" a été annulée par l\'administration ZUKAGO. Nous nous excusons pour ce désagrément.', { title: listing.title }),
-            type:    'info',
-          };
+          return notifyUser(b.user_id, {
+            title: await i18n.t('notif_booking_cancelled_title', clientLang, 'Réservation annulée'),
+            body:  await i18n.t('notif_booking_cancelled_admin_body', clientLang, 'Votre réservation confirmée pour "{title}" a été annulée par l\'administration ZUKAGO. Nous nous excusons pour ce désagrément.', { title: listing.title }),
+            type:  'info',
+            data:  { booking_id: b.id, listing_id: listing.id },
+          });
         })
       );
-      await db.from('notifications').insert(confirmedNotifs);
     }
 
     // Notifier le partenaire
@@ -720,14 +722,15 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
         .single();
       if (partnerRow?.user_id) {
         // ✅ V14.5.3 i18n : notif au partenaire dans sa langue
+        // ✅ V14.5.4 : helper notifyUser (DB + push Expo)
         const partnerLang = await i18n.getUserLang(partnerRow.user_id);
-        await db.from('notifications').insert({
-          user_id: partnerRow.user_id,
-          title:   await i18n.t('notif_listing_deleted_title', partnerLang, 'Annonce supprimée par l\'administration'),
-          body:    await i18n.t('notif_listing_deleted_body',  partnerLang, 'Votre annonce "{title}" a été supprimée par l\'équipe ZUKAGO. {count} réservation(s) confirmée(s) ont été annulées et les clients notifiés.', {
+        await notifyUser(partnerRow.user_id, {
+          title: await i18n.t('notif_listing_deleted_title', partnerLang, 'Annonce supprimée par l\'administration'),
+          body:  await i18n.t('notif_listing_deleted_body',  partnerLang, 'Votre annonce "{title}" a été supprimée par l\'équipe ZUKAGO. {count} réservation(s) confirmée(s) ont été annulées et les clients notifiés.', {
             title: listing.title, count: confirmedBookings.length,
           }),
-          type:    'info',
+          type:  'info',
+          data:  { listing_id: listing.id },
         });
       }
     } catch (e) { console.log('Partner notif error:', e.message); }
@@ -747,18 +750,18 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
 
     if (pendingDetails?.length) {
       // ✅ V14.5.3 i18n : notif multilingue à chaque client (pending)
-      const pendingNotifs = await Promise.all(
+      // ✅ V14.5.4 : notifyUser() par client (langues différentes — pas de batch)
+      await Promise.all(
         pendingDetails.map(async (b) => {
           const clientLang = await i18n.getUserLang(b.user_id);
-          return {
-            user_id: b.user_id,
+          return notifyUser(b.user_id, {
             title: await i18n.t('notif_booking_cancelled_title', clientLang, 'Réservation annulée'),
             body:  await i18n.t('notif_booking_cancelled_listing_deleted_body', clientLang, 'Votre réservation pour "{title}" a été annulée car l\'annonce a été supprimée.', { title: listing.title }),
             type:  'info',
-          };
+            data:  { listing_id: listing.id },
+          });
         })
       );
-      await db.from('notifications').insert(pendingNotifs);
     }
   }
 

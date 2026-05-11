@@ -4,6 +4,8 @@ const { authenticate, requirePartner } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
 const commissionService = require('../services/commissionService');
 const i18n = require('../services/i18nService');
+// ✅ V14.5.4 : Helper centralisé notification (DB insert + push Expo)
+const { notifyUser, notifyUsers } = require('../services/notifyUser');
 
 const router = express.Router();
 
@@ -448,24 +450,24 @@ router.post('/request', authenticate, asyncHandler(async (req, res) => {
   if (admins?.length) {
     try {
       // ✅ V14.5.3 i18n : chaque admin reçoit la notif dans sa langue
+      // ✅ V14.5.4 : notifyUser() par admin (langues différentes — pas de batch)
       const userName = req.user.name || null;
       const requestType = type || null;
-      const notifs = await Promise.all(
+      await Promise.all(
         admins.map(async (a) => {
           const adminLang = await i18n.getUserLang(a.id);
           const userNameTranslated = userName || await i18n.t('partners_a_user', adminLang, 'Un utilisateur');
           const typeTranslated = requestType || await i18n.t('partners_default_type', adminLang, 'proprietaire');
-          return {
-            user_id: a.id,
-            title:   await i18n.t('notif_new_partner_request_title', adminLang, 'Nouvelle demande partenaire'),
-            body:    await i18n.t('notif_new_partner_request_body',  adminLang, '{name} a soumis une demande partenaire ({type}).', {
+          return notifyUser(a.id, {
+            title: await i18n.t('notif_new_partner_request_title', adminLang, 'Nouvelle demande partenaire'),
+            body:  await i18n.t('notif_new_partner_request_body',  adminLang, '{name} a soumis une demande partenaire ({type}).', {
               name: userNameTranslated, type: typeTranslated,
             }),
-            type:    'partner',
-          };
+            type:  'partner',
+            data:  { requesting_user_id: req.user.id, request_type: requestType },
+          });
         })
       );
-      await db.from('notifications').insert(notifs);
       console.log(`[Partners] ✅ ${admins.length} admin notifications sent`);
     } catch(e) { console.log(`[Partners] admin notif error: ${e.message}`); }
   }

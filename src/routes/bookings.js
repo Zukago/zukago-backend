@@ -9,6 +9,8 @@ const pricingService    = require('../services/pricingService');   // ✅ V13 : 
 const statsService      = require('../services/statsService');
 const emailService = require('../services/emailService');
 const i18n = require('../services/i18nService');
+// ✅ V14.5.4 : Helper centralisé notification (DB insert + push Expo)
+const { notifyUser } = require('../services/notifyUser');
 
 const router = express.Router();
 
@@ -307,19 +309,20 @@ router.post('/', authenticate, [
     // Notification partenaire
     try {
       // ✅ V14.5.3 i18n : notif dans la langue du partenaire
+      // ✅ V14.5.4 : helper notifyUser (DB + push Expo) + data deep linking
       const partnerUserId = listing.partners?.user_id;
       const L = await i18n.getUserLang(partnerUserId);
       const clientName = req.user.name || await i18n.t('notif_a_client', L, 'Un client');
       const dateRange = start_date
         ? await i18n.t('notif_booking_date_range', L, ' du {start} au {end}', { start: start_date, end: end_date })
         : '';
-      await db.from('notifications').insert({
-        user_id: partnerUserId,
+      await notifyUser(partnerUserId, {
         title: await i18n.t('notif_new_booking_title', L, 'Nouvelle réservation'),
-        body: await i18n.t('notif_new_booking_body', L, '{name} a réservé "{title}"{range}', {
+        body:  await i18n.t('notif_new_booking_body', L, '{name} a réservé "{title}"{range}', {
           name: clientName, title: listing.title, range: dateRange,
         }),
-        type: 'booking',
+        type:  'booking',
+        data:  { booking_id: booking.id, listing_id: listing.id },
       });
     } catch(e) { console.log('Notif error:', e.message); }
 
@@ -441,12 +444,13 @@ router.patch('/:id/confirm-partner', authenticate, asyncHandler(async (req, res)
   // Notifier le client (V13 : sans emoji UI)
   try {
     // ✅ V14.5.3 i18n : notif dans la langue du client
+    // ✅ V14.5.4 : helper notifyUser (DB + push Expo) + data deep linking
     const L = await i18n.getUserLang(booking.user_id);
-    await db.from('notifications').insert({
-      user_id: booking.user_id,
+    await notifyUser(booking.user_id, {
       title: await i18n.t('notif_booking_confirmed_title', L, 'Réservation confirmée'),
       body:  await i18n.t('notif_booking_confirmed_body',  L, 'Votre réservation a été confirmée par le propriétaire.'),
-      type: 'booking',
+      type:  'booking',
+      data:  { booking_id: booking.id },
     });
   } catch(e) {}
 
@@ -477,14 +481,15 @@ router.patch('/:id/cancel', authenticate, asyncHandler(async (req, res) => {
   // Notifier le client (V13 : sans emoji UI)
   try {
     // ✅ V14.5.3 i18n : notif dans la langue du client
+    // ✅ V14.5.4 : helper notifyUser (DB + push Expo) + data deep linking
     const L = await i18n.getUserLang(booking.user_id);
-    await db.from('notifications').insert({
-      user_id: booking.user_id,
+    await notifyUser(booking.user_id, {
       title: await i18n.t('notif_booking_cancelled_title', L, 'Réservation annulée'),
       body:  reason
         ? await i18n.t('notif_booking_cancelled_reason', L, 'Raison: {reason}', { reason })
         : await i18n.t('notif_booking_cancelled_default', L, 'Votre réservation a été annulée.'),
-      type: 'info',
+      type:  'info',
+      data:  { booking_id: booking.id },
     });
   } catch(e) {}
 

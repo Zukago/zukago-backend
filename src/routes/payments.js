@@ -9,6 +9,8 @@ const statsService = require('../services/statsService');
 const { authenticate } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
 const i18n = require('../services/i18nService');
+// ✅ V14.5.4 : Helper centralisé notification (DB insert + push Expo)
+const { notifyUser } = require('../services/notifyUser');
 
 const router = express.Router();
 
@@ -396,13 +398,14 @@ router.post('/stripe/webhook', async (req, res) => {
         if (partnerUserId) {
           try {
             // ✅ V14.5.3 i18n : notif au partenaire dans sa langue
+            // ✅ V14.5.4 : helper notifyUser (DB + push Expo) + data deep linking
             const partnerLang = await i18n.getUserLang(partnerUserId);
             const dateRange = created.start_date ? ` ${await i18n.t('payments_notif_from_to', partnerLang, 'du {start} au {end}', { start: created.start_date, end: created.end_date })}` : '';
-            await db.from('notifications').insert({
-              user_id: partnerUserId,
-              title:   await i18n.t('notif_new_booking_confirmed_title', partnerLang, 'Nouvelle réservation confirmée'),
-              body:    await i18n.t('notif_new_booking_confirmed_body',  partnerLang, 'Une réservation a été confirmée pour "{title}"{dateRange}', { title: listing.title, dateRange }),
-              type:    'booking',
+            await notifyUser(partnerUserId, {
+              title: await i18n.t('notif_new_booking_confirmed_title', partnerLang, 'Nouvelle réservation confirmée'),
+              body:  await i18n.t('notif_new_booking_confirmed_body',  partnerLang, 'Une réservation a été confirmée pour "{title}"{dateRange}', { title: listing.title, dateRange }),
+              type:  'booking',
+              data:  { booking_id: created.id, listing_id: listing.id },
             });
             console.log('[Stripe webhook V14.4] Notif partenaire OK');
           } catch(e) { console.log('[Stripe webhook V14.4] Notif error:', e.message); }
@@ -473,13 +476,14 @@ router.post('/stripe/webhook', async (req, res) => {
         if (partnerUserId) {
           try {
             // ✅ V14.5.3 i18n : notif au partenaire dans sa langue
+            // ✅ V14.5.4 : helper notifyUser (DB + push Expo) + data deep linking
             const partnerLang = await i18n.getUserLang(partnerUserId);
             const dateRange = updated.start_date ? ` ${await i18n.t('payments_notif_from_to', partnerLang, 'du {start} au {end}', { start: updated.start_date, end: updated.end_date })}` : '';
-            await db.from('notifications').insert({
-              user_id: partnerUserId,
+            await notifyUser(partnerUserId, {
               title: await i18n.t('notif_new_booking_confirmed_title', partnerLang, 'Nouvelle réservation confirmée'),
               body:  await i18n.t('notif_new_booking_confirmed_body',  partnerLang, 'Une réservation a été confirmée pour "{title}"{dateRange}', { title: listing.title, dateRange }),
-              type: 'booking',
+              type:  'booking',
+              data:  { booking_id: updated.id, listing_id: listing.id },
             });
           } catch(e) { console.log('[Stripe webhook] Notif error:', e.message); }
         }
@@ -603,13 +607,14 @@ router.post('/cinetpay/notify', asyncHandler(async (req, res) => {
         if (partnerUserId) {
           try {
             // ✅ V14.5.3 i18n : notif au partenaire dans sa langue
+            // ✅ V14.5.4 : helper notifyUser (DB + push Expo) + data deep linking
             const partnerLang = await i18n.getUserLang(partnerUserId);
             const dateRange = updated.start_date ? ` ${await i18n.t('payments_notif_from_to', partnerLang, 'du {start} au {end}', { start: updated.start_date, end: updated.end_date })}` : '';
-            await db.from('notifications').insert({
-              user_id: partnerUserId,
+            await notifyUser(partnerUserId, {
               title: await i18n.t('notif_new_booking_confirmed_title', partnerLang, 'Nouvelle réservation confirmée'),
               body:  await i18n.t('notif_new_booking_confirmed_body',  partnerLang, 'Une réservation a été confirmée pour "{title}"{dateRange}', { title: listing.title, dateRange }),
-              type: 'booking',
+              type:  'booking',
+              data:  { booking_id: updated.id, listing_id: listing.id },
             });
           } catch(e) { console.log('[CinetPay notify] Notif error:', e.message); }
         }

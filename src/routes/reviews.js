@@ -8,6 +8,8 @@ const db      = require('../config/database');
 const { authenticate, optionalAuth } = require('../middleware/auth');
 const { asyncHandler }               = require('../middleware/errorHandler');
 const i18n    = require('../services/i18nService');
+// ✅ V14.5.4 : Helper centralisé notification (DB insert + push Expo)
+const { notifyUser } = require('../services/notifyUser');
 
 const router = express.Router();
 
@@ -178,14 +180,15 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
 
     if (listing?.partners?.user_id) {
       // ✅ V14.5.3 i18n : notif dans la langue du partenaire
+      // ✅ V14.5.4 : helper notifyUser (DB + push Expo) + data deep linking
       const partnerLang = await i18n.getUserLang(listing.partners.user_id);
-      await db.from('notifications').insert({
-        user_id: listing.partners.user_id,
-        title:   await i18n.t('notif_new_review_title', partnerLang, '⭐ Nouvel avis reçu !'),
-        body:    await i18n.t('notif_new_review_body',  partnerLang, '{name} a laissé un avis {rating}/5 sur "{title}"', {
+      await notifyUser(listing.partners.user_id, {
+        title: await i18n.t('notif_new_review_title', partnerLang, '⭐ Nouvel avis reçu !'),
+        body:  await i18n.t('notif_new_review_body',  partnerLang, '{name} a laissé un avis {rating}/5 sur "{title}"', {
           name: req.user.name, rating, title: listing.title,
         }),
-        type:    'review',
+        type:  'review',
+        data:  { listing_id, rating },
       });
     }
   } catch (e) { console.log('Review notif error:', e.message); }
