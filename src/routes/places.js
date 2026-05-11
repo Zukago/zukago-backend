@@ -210,8 +210,19 @@ router.get('/reverse-geocode', asyncHandler(async (req, res) => {
   const resp = await fetch(url);
   const data = await resp.json();
 
+  // ✅ V14.5.4 DEBUG : log et renvoyer raison si erreur Google
   if (data.status !== 'OK' || !data.results || data.results.length === 0) {
-    return res.json({ result: null });
+    console.log('🔴 [REVERSE-GEOCODE] Google status:', data.status);
+    console.log('🔴 [REVERSE-GEOCODE] Error message:', data.error_message);
+    console.log('🔴 [REVERSE-GEOCODE] Results count:', data.results?.length || 0);
+    return res.json({
+      result: null,
+      _debug: {
+        google_status:    data.status,
+        google_error:     data.error_message || null,
+        results_count:    data.results?.length || 0,
+      },
+    });
   }
 
   // ✅ Stratégie de sélection :
