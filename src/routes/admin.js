@@ -6,6 +6,8 @@ const emailService = require('../services/emailService');
 const commissionService = require('../services/commissionService');
 const statsService      = require('../services/statsService');
 const i18n = require('../services/i18nService');
+// ✅ V14.5.4 : Helper centralisé notification (DB insert + push Expo)
+const { notifyUser, notifyUsers } = require('../services/notifyUser');
 
 const router = express.Router();
 router.use(authenticate, requireAdmin);
@@ -84,9 +86,9 @@ router.patch('/partners/:id/approve', asyncHandler(async (req, res) => {
   // Notification in-app
   try {
     // ✅ V14.5.3 i18n : notif dans la langue du partenaire
+    // ✅ V14.5.4 : helper notifyUser (DB + push Expo)
     const L = await i18n.getUserLang(userId);
-    await db.from('notifications').insert({
-      user_id: userId,
+    await notifyUser(userId, {
       title: await i18n.t('notif_partner_approved_title', L, '🎉 Compte partenaire approuvé !'),
       body:  await i18n.t('notif_partner_approved_body',  L, 'Bienvenue {name} ! Vous pouvez maintenant publier vos annonces sur ZUKAGO.', { name: user.name }),
       type: 'info',
@@ -135,8 +137,8 @@ router.patch('/partners/:id/reject', asyncHandler(async (req, res) => {
     const reasonText = message
       ? await i18n.t('notif_partner_rejected_reason',     L, 'Raison : {reason}', { reason: message })
       : await i18n.t('notif_partner_rejected_no_reason',  L, 'Contactez le support.');
-    await db.from('notifications').insert({
-      user_id: userId,
+    // ✅ V14.5.4 : helper notifyUser (DB + push Expo)
+    await notifyUser(userId, {
       title: await i18n.t('notif_partner_rejected_title', L, 'Demande partenaire refusée'),
       body:  await i18n.t('notif_partner_rejected_body',  L, 'Votre demande partenaire n\'a pas ete approuvee. {reason}', { reason: reasonText }),
       type: 'info',
@@ -231,18 +233,17 @@ router.delete('/partners/:id', asyncHandler(async (req, res) => {
         const uniqueClientIds = [...new Set(activeBookings.map(b => b.user_id))];
         try {
           // ✅ V14.5.3 i18n : chaque client reçoit la notif dans sa langue
-          const notifs = await Promise.all(
+          // ✅ V14.5.4 : notifyUser() par user (langues différentes — pas de batch)
+          await Promise.all(
             uniqueClientIds.map(async (cid) => {
               const L = await i18n.getUserLang(cid);
-              return {
-                user_id: cid,
-                title:   await i18n.t('notif_partner_retired_title', L, 'Réservation annulée'),
-                body:    await i18n.t('notif_partner_retired_body',  L, 'Le partenaire ({name}) a été retiré de la plateforme. Votre réservation a été annulée. Contactez le support ZUKAGO.', { name: user.name }),
-                type:    'info',
-              };
+              return notifyUser(cid, {
+                title: await i18n.t('notif_partner_retired_title', L, 'Réservation annulée'),
+                body:  await i18n.t('notif_partner_retired_body',  L, 'Le partenaire ({name}) a été retiré de la plateforme. Votre réservation a été annulée. Contactez le support ZUKAGO.', { name: user.name }),
+                type:  'info',
+              });
             })
           );
-          await db.from('notifications').insert(notifs);
         } catch (e) { log.push(`Client notif error: ${e.message}`); }
       }
 
@@ -286,12 +287,12 @@ router.delete('/partners/:id', asyncHandler(async (req, res) => {
   // Notifier le user
   try {
     // ✅ V14.5.3 i18n : notif dans la langue de l'user
+    // ✅ V14.5.4 : helper notifyUser (DB + push Expo)
     const L = await i18n.getUserLang(userId);
-    await db.from('notifications').insert({
-      user_id: userId,
-      title:   await i18n.t('notif_partner_status_removed_title', L, 'Statut partenaire retiré'),
-      body:    await i18n.t('notif_partner_status_removed_body',  L, 'Votre compte a été remis en statut client. Contactez le support ZUKAGO pour plus d\'informations.'),
-      type:    'info',
+    await notifyUser(userId, {
+      title: await i18n.t('notif_partner_status_removed_title', L, 'Statut partenaire retiré'),
+      body:  await i18n.t('notif_partner_status_removed_body',  L, 'Votre compte a été remis en statut client. Contactez le support ZUKAGO pour plus d\'informations.'),
+      type:  'info',
     });
   } catch (e) { /* ignore */ }
 
@@ -398,9 +399,9 @@ router.patch('/listings/:id/approve', asyncHandler(async (req, res) => {
     const { data: partner } = await db.from('partners').select('user_id').eq('id', listing.partner_id).single();
     if (partner) {
       // ✅ V14.5.3 i18n : notif dans la langue du partenaire
+      // ✅ V14.5.4 : helper notifyUser (DB + push Expo)
       const L = await i18n.getUserLang(partner.user_id);
-      await db.from('notifications').insert({
-        user_id: partner.user_id,
+      await notifyUser(partner.user_id, {
         title: await i18n.t('notif_listing_approved_title', L, 'Annonce approuvée'),
         body:  await i18n.t('notif_listing_approved_body',  L, 'Votre annonce "{title}" est maintenant visible sur ZUKAGO. Bonne chance !', { title: listing.title }),
         type: 'info',
@@ -431,10 +432,10 @@ router.patch('/listings/:id/reject', asyncHandler(async (req, res) => {
     const { data: partner } = await db.from('partners').select('user_id').eq('id', listing.partner_id).single();
     if (partner) {
       // ✅ V14.5.3 i18n : notif dans la langue du partenaire
+      // ✅ V14.5.4 : helper notifyUser (DB + push Expo)
       const L = await i18n.getUserLang(partner.user_id);
       const reason = message || await i18n.t('notif_listing_rejected_default_reason', L, 'Critères non respectés');
-      await db.from('notifications').insert({
-        user_id: partner.user_id,
+      await notifyUser(partner.user_id, {
         title: await i18n.t('notif_listing_rejected_title', L, 'Annonce non approuvée ❌'),
         body:  await i18n.t('notif_listing_rejected_body',  L, 'Votre annonce "{title}" n\'a pas été approuvée. Raison: {reason}', { title: listing.title, reason }),
         type: 'info',
@@ -482,10 +483,10 @@ router.patch('/withdrawals/:id/approve', asyncHandler(async (req, res) => {
   // Notification in-app
   try {
     // ✅ V14.5.3 i18n : notif dans la langue du partenaire
+    // ✅ V14.5.4 : helper notifyUser (DB + push Expo)
     const partnerUserId = withdrawal.partners?.user_id || null;
     const L = await i18n.getUserLang(partnerUserId);
-    await db.from('notifications').insert({
-      user_id: partnerUserId,
+    await notifyUser(partnerUserId, {
       title: await i18n.t('notif_withdrawal_approved_title', L, 'Virement effectué'),
       body:  await i18n.t('notif_withdrawal_approved_body',  L, 'Votre retrait de {amount} FCFA a été traité. Vous devriez le recevoir sous 24-48h.', {
         amount: withdrawal.amount?.toLocaleString() || '0',
@@ -590,25 +591,22 @@ router.post('/notifications/send', asyncHandler(async (req, res) => {
 
   const { data: users } = await query;
 
-  // Créer notifications en DB
-  const notifications = (users || []).map(u => ({
-    user_id: u.id,
-    title,
-    body,
-    type: 'push',
-    read: false,
-  }));
-
-  if (notifications.length) {
-    await db.from('notifications').insert(notifications);
+  // ✅ V14.5.4 : utilise notifyUsers (batch DB + push Expo en parallèle)
+  // Note : même message identique pour tous → batch OK
+  let result = { db_ok: 0, push_ok: 0, total: 0 };
+  if (users?.length) {
+    const userIds = users.map(u => u.id);
+    result = await notifyUsers(userIds, {
+      title,
+      body,
+      type: 'push',
+    });
   }
-
-  // En Phase G : envoyer via Firebase Cloud Messaging (FCM)
-  // await firebaseService.sendToUsers(users, { title, body });
 
   res.json({
     message: `Notification envoyée à ${users?.length || 0} utilisateurs`,
     count: users?.length || 0,
+    push_delivered: result.push_ok,
   });
 }));
 
@@ -786,9 +784,9 @@ router.patch('/users/:id/suspend', asyncHandler(async (req, res) => {
   // Notif in-app
   try {
     // ✅ V14.5.3 i18n : notif dans la langue de l'user
+    // ✅ V14.5.4 : helper notifyUser (DB + push Expo)
     const L = await i18n.getUserLang(req.params.id);
-    await db.from('notifications').insert({
-      user_id: req.params.id,
+    await notifyUser(req.params.id, {
       title: active
         ? await i18n.t('notif_account_reactivated_title', L, 'Compte réactivé')
         : await i18n.t('notif_account_suspended_title',   L, 'Compte suspendu'),
@@ -843,18 +841,19 @@ router.delete('/users/:id', asyncHandler(async (req, res) => {
           log.push(`Clients to notify: ${uniqueClientIds.length}`);
 
           // ✅ V14.5.3 i18n : chaque client reçoit la notif dans sa langue
-          const notifs = await Promise.all(
-            uniqueClientIds.map(async (clientId) => {
-              const L = await i18n.getUserLang(clientId);
-              return {
-                user_id: clientId,
-                title:   await i18n.t('notif_partner_left_title', L, 'Réservation annulée'),
-                body:    await i18n.t('notif_partner_left_body',  L, 'Le partenaire a quitté la plateforme. Votre réservation pour "{name}" a été annulée. Contactez le support ZUKAGO pour un remboursement ou une alternative.', { name: user.name }),
-                type:    'info',
-              };
-            })
-          );
-          await db.from('notifications').insert(notifs).catch(e => log.push(`Client notif error: ${e.message}`));
+          // ✅ V14.5.4 : notifyUser() par user (langues différentes — pas de batch)
+          try {
+            await Promise.all(
+              uniqueClientIds.map(async (clientId) => {
+                const L = await i18n.getUserLang(clientId);
+                return notifyUser(clientId, {
+                  title: await i18n.t('notif_partner_left_title', L, 'Réservation annulée'),
+                  body:  await i18n.t('notif_partner_left_body',  L, 'Le partenaire a quitté la plateforme. Votre réservation pour "{name}" a été annulée. Contactez le support ZUKAGO pour un remboursement ou une alternative.', { name: user.name }),
+                  type:  'info',
+                });
+              })
+            );
+          } catch (e) { log.push(`Client notif error: ${e.message}`); }
         }
 
         // 1c. Supprimer photos Cloudinary
@@ -1057,12 +1056,12 @@ router.patch('/client-promotions/:userId/approve', asyncHandler(async (req, res)
   // Notification au user
   try {
     // ✅ V14.5.3 i18n : notif dans la langue de l'user
+    // ✅ V14.5.4 : helper notifyUser (DB + push Expo)
     const L = await i18n.getUserLang(userId);
-    await db.from('notifications').insert({
-      user_id: userId,
-      title:   await i18n.t('notif_client_promoted_title', L, 'Félicitations ! Vous êtes maintenant partenaire ZUKAGO 🎉'),
-      body:    await i18n.t('notif_client_promoted_body',  L, 'Votre demande a été approuvée. Vous pouvez maintenant publier vos annonces.'),
-      type:    'success',
+    await notifyUser(userId, {
+      title: await i18n.t('notif_client_promoted_title', L, 'Félicitations ! Vous êtes maintenant partenaire ZUKAGO 🎉'),
+      body:  await i18n.t('notif_client_promoted_body',  L, 'Votre demande a été approuvée. Vous pouvez maintenant publier vos annonces.'),
+      type:  'success',
     });
   } catch (e) { /* ignore */ }
 
@@ -1097,12 +1096,12 @@ router.patch('/client-promotions/:userId/reject', asyncHandler(async (req, res) 
   // Notif
   try {
     // ✅ V14.5.3 i18n : notif dans la langue de l'user
+    // ✅ V14.5.4 : helper notifyUser (DB + push Expo)
     const L = await i18n.getUserLang(userId);
-    await db.from('notifications').insert({
-      user_id: userId,
-      title:   await i18n.t('notif_client_promotion_rejected_title', L, 'Demande partenaire non retenue'),
-      body:    message || await i18n.t('notif_client_promotion_rejected_body', L, 'Votre demande n\'a pas pu être validée. Vous pouvez la re-soumettre.'),
-      type:    'info',
+    await notifyUser(userId, {
+      title: await i18n.t('notif_client_promotion_rejected_title', L, 'Demande partenaire non retenue'),
+      body:  message || await i18n.t('notif_client_promotion_rejected_body', L, 'Votre demande n\'a pas pu être validée. Vous pouvez la re-soumettre.'),
+      type:  'info',
     });
   } catch (e) { /* ignore */ }
 
