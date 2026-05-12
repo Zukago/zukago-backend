@@ -134,38 +134,154 @@ router.post('/login', loginLimiter, [
 
 // GET /api/auth/verify-email?token=xxx
 router.get('/verify-email', asyncHandler(async (req, res) => {
+  // ✅ V14.5.4 : Helper pour renderer une belle page HTML (succès OU erreur)
+  const renderPage = (status, type, title, message) => {
+    const isSuccess = type === 'success';
+    const accentColor = isSuccess ? '#10B981' : (type === 'expired' ? '#F59E0B' : '#EF4444');
+    const icon = isSuccess ? '✓' : (type === 'expired' ? '⏰' : '✗');
+    const shadowColor = isSuccess ? '16, 185, 129' : (type === 'expired' ? '245, 158, 11' : '239, 68, 68');
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.status(status).send(`<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ZUKAGO — ${title}</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #0F2455 0%, #1A3A75 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .card {
+      background: #FFFFFF;
+      border-radius: 24px;
+      padding: 48px 32px;
+      max-width: 440px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    .logo {
+      font-size: 28px;
+      font-weight: 800;
+      color: #0F2455;
+      letter-spacing: 2px;
+      margin-bottom: 8px;
+    }
+    .tagline {
+      font-size: 12px;
+      color: #C9A24D;
+      letter-spacing: 4px;
+      margin-bottom: 32px;
+      text-transform: uppercase;
+    }
+    .icon-status {
+      width: 80px;
+      height: 80px;
+      background: ${accentColor};
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 24px;
+      font-size: 40px;
+      color: white;
+      box-shadow: 0 8px 24px rgba(${shadowColor}, 0.3);
+    }
+    h1 {
+      font-size: 24px;
+      color: #0F2455;
+      margin-bottom: 12px;
+      font-weight: 800;
+    }
+    p {
+      font-size: 15px;
+      color: #6B7280;
+      line-height: 1.6;
+      margin-bottom: 32px;
+    }
+    .btn {
+      display: inline-block;
+      background: #0F2455;
+      color: white;
+      text-decoration: none;
+      padding: 14px 32px;
+      border-radius: 12px;
+      font-weight: 700;
+      font-size: 15px;
+      transition: transform 0.2s, background 0.2s;
+    }
+    .btn:hover { background: #1A3A75; transform: translateY(-2px); }
+    .footer {
+      margin-top: 32px;
+      font-size: 12px;
+      color: #9CA3AF;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">ZUKAGO</div>
+    <div class="tagline">Emerge · Move</div>
+    <div class="icon-status">${icon}</div>
+    <h1>${title}</h1>
+    <p>${message}</p>
+    <a href="zukago://" class="btn">Retour à l'application</a>
+    <div class="footer">© ZUKAGO · contact@zukago.com</div>
+  </div>
+</body>
+</html>`);
+  };
+
   const { token } = req.query;
-  if (!token) return res.status(400).json({ error: 'Token manquant' });
+  if (!token) {
+    return renderPage(400, 'error', 'Lien invalide',
+      'Le lien de vérification est incomplet. Veuillez réessayer depuis l\'application.');
+  }
 
   const { data: user } = await db.from('users')
     .select('id, verify_expires')
     .eq('verify_token', token)
     .single();
 
-  if (!user) return res.status(400).json({ error: 'Token invalide ou deja utilise' });
+  if (!user) {
+    return renderPage(400, 'error', 'Lien déjà utilisé',
+      'Ce lien de vérification a déjà été utilisé ou n\'est plus valide.<br>Si votre email n\'est pas encore vérifié, demandez un nouveau lien depuis l\'application.');
+  }
 
   if (new Date(user.verify_expires) < new Date()) {
-    return res.status(400).json({ error: 'Token expire. Demandez un nouveau lien.' });
+    return renderPage(400, 'expired', 'Lien expiré',
+      'Ce lien de vérification a expiré (validité 24h).<br>Demandez un nouveau lien depuis l\'application ZUKAGO.');
   }
 
   await db.from('users').update({
+    verified:       true,
     email_verified: true,
     verify_token:   null,
     verify_expires: null,
   }).eq('id', user.id);
 
-  res.json({ message: 'Email verifie avec succes.' });
+  // ✅ V14.5.4 : Belle page HTML succès
+  return renderPage(200, 'success', 'Email vérifié avec succès !',
+    'Votre adresse email a été confirmée.<br>Vous pouvez maintenant retourner dans l\'application ZUKAGO.');
 }));
 
 // ✅ V13.5 : POST /api/auth/resend-verification — renvoyer email de vérification
 router.post('/resend-verification', authenticate, asyncHandler(async (req, res) => {
   const { data: user } = await db.from('users')
-    .select('id, name, email, email_verified')
+    .select('id, name, email, verified')
     .eq('id', req.user.id)
     .single();
 
   if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
-  if (user.email_verified) return res.status(400).json({ error: 'Email déjà vérifié' });
+  if (user.verified) return res.status(400).json({ error: 'Email déjà vérifié' });
 
   // Générer un nouveau token
   const verifyToken   = crypto.randomBytes(32).toString('hex');
@@ -250,14 +366,13 @@ router.post('/google', asyncHandler(async (req, res) => {
     }
   } else {
     // ✅ V14.5.4 : User existant qui se connecte via Google
-    //              → on upgrade automatiquement email_verified (Google a vérifié)
-    //              → on garde verified tel quel (KYC ZUKAGO indépendant)
+    //              → upgrade email_verified=true (Google a déjà vérifié son email)
+    //              → ne PAS toucher verified (KYC ZUKAGO indépendant)
     const updates = {};
     if (verifiedAvatar && !user.avatar) updates.avatar = verifiedAvatar;
     if (!user.email_verified) updates.email_verified = true;
     if (Object.keys(updates).length > 0) {
       await db.from('users').update(updates).eq('id', user.id);
-      // Refléter dans l'objet user retourné
       Object.assign(user, updates);
     }
   }
