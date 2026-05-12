@@ -34,6 +34,19 @@ router.post('/register-token', authenticate, asyncHandler(async (req, res) => {
   res.json({ message: 'Token enregistré' });
 }));
 
+// ─── DELETE /api/notifications/push-token ─────────────────────────────────────
+// ✅ V14.5.4 : Cleanup push_token à la déconnexion (sécurité + RGPD)
+//              Empêche le device de continuer à recevoir des push
+//              destinées à un user déconnecté.
+router.delete('/push-token', authenticate, asyncHandler(async (req, res) => {
+  try {
+    await db.from('push_tokens')
+      .delete()
+      .eq('user_id', req.user.id);
+  } catch (e) { console.log('push_tokens delete:', e.message); }
+  res.json({ message: 'Token supprimé' });
+}));
+
 // ─── GET /api/notifications ───────────────────────────────────────────────────
 // ✅ V14.5.4 FIX : suppression du filtre 'target' et 'deleted' (colonnes
 //                  inexistantes en DB qui faisaient renvoyer un array vide).
