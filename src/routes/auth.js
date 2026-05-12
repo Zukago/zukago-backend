@@ -65,10 +65,11 @@ router.post('/register', registerLimiter, [
     role,
     provider:          'email',
     verified:          false,
+    email_verified:    false,
     demande_verified:  false,
     verify_token:      verifyToken,
     verify_expires:    verifyExpires,
-  }).select('id, name, email, role, verified, demande_verified').single();
+  }).select('id, name, email, role, verified, email_verified, demande_verified').single();
 
   if (error) throw new Error(error.message);
 
@@ -109,7 +110,7 @@ router.post('/login', loginLimiter, [
 
   const { data: user } = await db
     .from('users')
-    .select('id, name, email, role, password, active, avatar, verified, demande_verified')
+    .select('id, name, email, role, password, active, avatar, verified, email_verified, demande_verified')
     .eq('email', email)
     .single();
 
@@ -148,7 +149,7 @@ router.get('/verify-email', asyncHandler(async (req, res) => {
   }
 
   await db.from('users').update({
-    verified:       true,
+    email_verified: true,
     verify_token:   null,
     verify_expires: null,
   }).eq('id', user.id);
@@ -159,12 +160,12 @@ router.get('/verify-email', asyncHandler(async (req, res) => {
 // ✅ V13.5 : POST /api/auth/resend-verification — renvoyer email de vérification
 router.post('/resend-verification', authenticate, asyncHandler(async (req, res) => {
   const { data: user } = await db.from('users')
-    .select('id, name, email, verified')
+    .select('id, name, email, email_verified')
     .eq('id', req.user.id)
     .single();
 
   if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
-  if (user.verified) return res.status(400).json({ error: 'Email déjà vérifié' });
+  if (user.email_verified) return res.status(400).json({ error: 'Email déjà vérifié' });
 
   // Générer un nouveau token
   const verifyToken   = crypto.randomBytes(32).toString('hex');
@@ -234,9 +235,10 @@ router.post('/google', asyncHandler(async (req, res) => {
       avatar:            verifiedAvatar,
       provider:          'google',
       role:              'client',
-      verified:          true,
+      verified:          false,
+      email_verified:    true,
       demande_verified:  false,
-    }).select('id, name, email, role, avatar, verified, demande_verified').single();
+    }).select('id, name, email, role, avatar, verified, email_verified, demande_verified').single();
     if (error) throw new Error(error.message);
     user = newUser;
     // ✅ V13.5 : Google login = email déjà vérifié par Google → email de bienvenue (pas de vérification)
@@ -247,8 +249,16 @@ router.post('/google', asyncHandler(async (req, res) => {
       console.log('[Auth Google] ❌ Erreur envoi email bienvenue:', e.message);
     }
   } else {
-    if (verifiedAvatar && !user.avatar) {
-      await db.from('users').update({ avatar: verifiedAvatar }).eq('id', user.id);
+    // ✅ V14.5.4 : User existant qui se connecte via Google
+    //              → on upgrade automatiquement email_verified (Google a vérifié)
+    //              → on garde verified tel quel (KYC ZUKAGO indépendant)
+    const updates = {};
+    if (verifiedAvatar && !user.avatar) updates.avatar = verifiedAvatar;
+    if (!user.email_verified) updates.email_verified = true;
+    if (Object.keys(updates).length > 0) {
+      await db.from('users').update(updates).eq('id', user.id);
+      // Refléter dans l'objet user retourné
+      Object.assign(user, updates);
     }
   }
 
@@ -302,7 +312,7 @@ router.get('/me', authenticate, asyncHandler(async (req, res) => {
 
   // Essai complet
   const { data: user, error } = await db.from('users')
-    .select('id, name, email, role, avatar, phone, whatsapp, verified, demande_verified, created_at')
+    .select('id, name, email, role, avatar, phone, whatsapp, verified, email_verified, demande_verified, created_at')
     .eq('id', req.user.id)
     .maybeSingle();
 
@@ -310,7 +320,7 @@ router.get('/me', authenticate, asyncHandler(async (req, res) => {
     console.log(`[Auth] /me fallback - ${error?.message || 'no user'}`);
     // Fallback : seulement colonnes sûres
     const { data: user2 } = await db.from('users')
-      .select('id, name, email, role, avatar, verified, demande_verified, created_at')
+      .select('id, name, email, role, avatar, verified, email_verified, demande_verified, created_at')
       .eq('id', req.user.id)
       .maybeSingle();
 
@@ -530,7 +540,7 @@ router.post('/reset-password', [
 
   // Récupérer le user
   const { data: user } = await db.from('users')
-    .select('id, name, email, role, avatar, active, verified, demande_verified')
+    .select('id, name, email, role, avatar, active, verified, email_verified, demande_verified')
     .eq('email', email)
     .maybeSingle();
 
