@@ -214,6 +214,17 @@ router.post('/', authenticate, [
 
   if (!listing) return res.status(404).json({ error: 'Annonce introuvable ou inactive' });
 
+  // ✅ V14.6.0 — Bloquer réservation si covoit expiré (date passée)
+  // → Sécurité serveur : peu importe l'UI, le backend protège.
+  // → Tolérance : on accepte la réservation toute la journée J (jour du départ)
+  // → Refuse dès que depart_date < aujourd'hui
+  if (listing.type === 'cov' && listing.depart_date) {
+    const today = new Date().toISOString().split('T')[0];
+    if (listing.depart_date < today) {
+      return res.status(410).json({ error: 'Ce trajet est passé et ne peut plus être réservé' });
+    }
+  }
+
   // ── Calcul prix via pricingService (V13)
   let calc;
   try {
