@@ -24,7 +24,8 @@ async function _resolveLang(req) {
 
 // ─── GET /api/listings — Liste publique ───────────────────────────────────────
 router.get('/', optionalAuth, asyncHandler(async (req, res) => {
-  const { type, city, min_price, max_price, sort, amenities, search, featured, limit = 20, offset = 0 } = req.query;
+  // ✅ V14.6.0 — Ajout date_start + date_end (PURE ADD : ignorés si non fournis)
+  const { type, city, min_price, max_price, sort, amenities, search, featured, limit = 20, offset = 0, date_start, date_end } = req.query;
 
   let q = db.from('listings')
     .select(`
@@ -51,8 +52,8 @@ router.get('/', optionalAuth, asyncHandler(async (req, res) => {
   // → Les autres types (apt/hotel/car/driver) NE SONT PAS affectés
   // → MyBookings/MyListings/Dashboard partner ne passent PAS par cette route → preservés
   if (type === 'cov') {
-    const today = new Date().toISOString().split('T')[0]; // 'YYYY-MM-DD'
-    q = q.gte('depart_date', today);
+    const todayUTC = new Date().toISOString().split('T')[0]; // 'YYYY-MM-DD'
+    q = q.gte('depart_date', todayUTC);
   }
 
   // ✅ V10 : tri spécial covoiturage par date de départ
@@ -80,6 +81,78 @@ router.get('/', optionalAuth, asyncHandler(async (req, res) => {
       main_photo: l.listing_photos?.find(p => p.is_main)?.url || l.listing_photos?.[0]?.url,
     };
   });
+
+  // ═════════════════════════════════════════════════════════════════════════════
+  // ✅ V14.6.0 — Filtre par dates (PURE ADD)
+  // → Activé UNIQUEMENT si date_start ET date_end sont fournis
+  // → Sinon : comportement INTACT (statu quo)
+  // → Conventions :
+  //    • apt/hotel/car  : booking 4→6 bloque 4 et 5 (check-out 6 = libre)
+  //    • driver         : booking 5→7 bloque 5, 6 ET 7 (inclusif)
+  //    • cov            : depart_date doit être dans [date_start, date_end]
+  //    • hotel          : passe TOUS (filtrage stock par room_type fait en V14.7)
+  // → Graceful degradation : si la query bookings échoue, on renvoie withRating
+  //   non filtré (mieux que crash — l'user verra peut-être 1-2 annonces bookées)
+  // ═════════════════════════════════════════════════════════════════════════════
+  if (date_start && date_end) {
+    try {
+      // Validation format date YYYY-MM-DD basique
+      const isValidDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d);
+      if (!isValidDate(date_start) || !isValidDate(date_end)) {
+        // Format invalide → on ignore le filtre dates (comportement statu quo)
+        return res.json({ listings: withRating, total: count });
+      }
+
+      // 1. Récupérer TOUS les bookings actifs qui chevauchent [date_start, date_end]
+      //    Convention chevauchement strict (apt/hotel/car) : start < date_end ET end > date_start
+      //    NB : pour driver (inclusif), on fait un 2e fetch séparé
+      const { data: overlappingBookingsExclusive } = await db.from('bookings')
+        .select('listing_id, start_date, end_date')
+        .in('status', ['confirmed', 'pending'])
+        .lt('start_date', date_end)   // booking commence AVANT la fin demandée
+        .gt('end_date', date_start);  // booking finit APRÈS le début demandé
+
+      // 2. Pour driver, convention inclusive : start <= date_end ET end >= date_start
+      const { data: overlappingBookingsInclusive } = await db.from('bookings')
+        .select('listing_id, start_date, end_date')
+        .in('status', ['confirmed', 'pending'])
+        .lte('start_date', date_end)
+        .gte('end_date', date_start);
+
+      // Map listing_id → set de types de blocage
+      const blockedIdsExclusive = new Set((overlappingBookingsExclusive || []).map(b => b.listing_id));
+      const blockedIdsInclusive = new Set((overlappingBookingsInclusive || []).map(b => b.listing_id));
+
+      // 3. Filtre intelligent par type
+      const filtered = withRating.filter(l => {
+        // HOTEL : on garde tout — le filtrage stock par room_type sera fait en V14.7
+        if (l.type === 'hotel') return true;
+
+        // COV (covoiturage) : depart_date doit être DANS [date_start, date_end]
+        if (l.type === 'cov') {
+          if (!l.depart_date) return false;
+          return l.depart_date >= date_start && l.depart_date <= date_end;
+        }
+
+        // DRIVER : convention inclusive (jour de fin compté)
+        if (l.type === 'driver') {
+          return !blockedIdsInclusive.has(l.id);
+        }
+
+        // APT / CAR : convention exclusive (jour de check-out libre)
+        return !blockedIdsExclusive.has(l.id);
+      });
+
+      return res.json({ listings: filtered, total: filtered.length });
+    } catch (filterError) {
+      // Graceful degradation : si erreur sur la query bookings, on renvoie withRating non filtré
+      console.error('[V14.6.0] Date filter error (graceful fallback):', filterError.message);
+      // → continue vers le res.json statu quo ci-dessous
+    }
+  }
+  // ═════════════════════════════════════════════════════════════════════════════
+  // ✅ V14.6.0 — Fin du bloc filtre dates
+  // ═════════════════════════════════════════════════════════════════════════════
 
   res.json({ listings: withRating, total: count });
 }));
