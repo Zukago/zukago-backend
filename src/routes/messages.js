@@ -197,12 +197,37 @@ router.get('/conversation/:listingId', authenticate, asyncHandler(async (req, re
   const isPartner = (userId === partnerUserId);
   let otherUserId = isPartner ? otherUserIdFromQuery : partnerUserId;
 
-  // ✅ V14.6.1 — Validation : si partner sans other_user_id → erreur 400
-  // → Avant ce fix, le partner voyait TOUS les messages mélangés (privacy leak)
+  // ✅ V14.6.1 — SMART FALLBACK : partner sans other_user_id explicite
+  // → Au lieu de renvoyer 400 (qui casse l'app 1.0.2 actuelle),
+  //   on prend automatiquement le DERNIER interlocuteur du partner sur ce listing.
+  // → Préserve la privacy (un seul thread chargé, pas de mélange A/B/C)
+  // → Rétrocompat parfaite avec app 1.0.2 (qui n'envoie pas other_user_id)
+  // → Quand app 1.0.3 sortira (passe explicitement other_user_id), ce fallback ne se déclenche pas
   if (isPartner && !otherUserId) {
-    return res.status(400).json({
-      error: await i18n.t('messages_error_other_user_required', L, "other_user_id requis quand le partenaire ouvre une conversation")
-    });
+    const { data: lastMsg } = await db.from('messages')
+      .select('sender_id, receiver_id')
+      .eq('listing_id', listingId)
+      .or(`sender_id.eq.${userId},receiver_id.eq.${userId}`)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!lastMsg) {
+      // Aucun message échangé encore → renvoyer une réponse vide propre
+      return res.json({
+        messages: [],
+        listing: {
+          id:              listing.id,
+          type:            listing.type,
+          title:           listing.title,
+          partner_user_id: partnerUserId,
+        },
+      });
+    }
+
+    // Déduire l'autre participant : celui qui n'est PAS le partner courant
+    otherUserId = (lastMsg.sender_id === userId) ? lastMsg.receiver_id : lastMsg.sender_id;
+    console.log('[Messages] Smart fallback : partner', userId, 'sees thread with last interlocutor', otherUserId, 'on listing', listingId);
   }
 
   // Filtre OR — TOUJOURS strict maintenant (plus de mélange)
