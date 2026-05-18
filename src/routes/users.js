@@ -95,4 +95,78 @@ router.patch('/preferred-lang', authenticate, asyncHandler(async (req, res) => {
   res.json({ ok: true, lang });
 }));
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ✅ V14.7.0 Bug B/J — GET /api/users/profile-badges
+// ═══════════════════════════════════════════════════════════════════════════
+// Endpoint agrégé pour les compteurs unread/pending par sous-section du Profil.
+//
+// Pourquoi un seul endpoint ?
+//   - Évite 4 calls API séparés depuis ProfileScreen
+//   - 1 round-trip réseau au lieu de 4 → meilleure perf
+//   - Tolérance aux pannes : try/catch par section, retourne 0 en cas d'erreur
+//
+// Retour :
+//   {
+//     conversations: 3,        // messages non lus (messages.read=false)
+//     notifications: 5,        // notifs non lues (notifications.read=false)
+//     bookings_pending: 2,     // bookings status='pending' (partner pas encore confirmé)
+//     payments_pending: 0      // paiements en attente
+//   }
+// ─── GET /api/users/profile-badges ────────────────────────────────────────────
+router.get('/profile-badges', authenticate, asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+  const badges = {
+    conversations:    0,
+    notifications:    0,
+    bookings_pending: 0,
+    payments_pending: 0,
+  };
+
+  // 1) Conversations (messages non lus reçus)
+  try {
+    const { count } = await db.from('messages')
+      .select('*', { count: 'exact', head: true })
+      .eq('receiver_id', userId)
+      .eq('read', false);
+    badges.conversations = count || 0;
+  } catch (e) {
+    console.log('[profile-badges] conversations error:', e.message);
+  }
+
+  // 2) Notifications non lues
+  try {
+    const { count } = await db.from('notifications')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('read', false);
+    badges.notifications = count || 0;
+  } catch (e) {
+    console.log('[profile-badges] notifications error:', e.message);
+  }
+
+  // 3) Bookings en attente côté CLIENT (réservations pending = partner pas encore confirmé)
+  try {
+    const { count } = await db.from('bookings')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('status', 'pending');
+    badges.bookings_pending = count || 0;
+  } catch (e) {
+    console.log('[profile-badges] bookings error:', e.message);
+  }
+
+  // 4) Paiements en attente
+  try {
+    const { count } = await db.from('bookings')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('payment', 'pending');
+    badges.payments_pending = count || 0;
+  } catch (e) {
+    console.log('[profile-badges] payments error:', e.message);
+  }
+
+  res.json(badges);
+}));
+
 module.exports = router;
