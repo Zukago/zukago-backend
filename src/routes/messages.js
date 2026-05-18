@@ -344,6 +344,9 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   // → Si elle n'existe pas → on la crée.
   // → Si elle existe → on récupère son id.
   // → Le message qu'on va insérer aura conversation_id rempli (cohérence DB).
+  //
+  // ⚠️ NB : on utilise SELECT puis INSERT (pas upsert) car le upsert
+  //          PostgREST avec onConflict multi-colonnes n'est pas fiable.
   // ═══════════════════════════════════════════════════════════════════════
   let conversationId = null;
   try {
@@ -351,27 +354,48 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     const clientId  = (senderId === partnerUserId) ? receiverId : senderId;
     const partnerId = partnerUserId;
 
-    // Upsert : insère si n'existe pas, sinon ne fait rien (grâce au UNIQUE constraint)
-    const { data: convUpsert, error: convErr } = await db.from('conversations')
-      .upsert(
-        {
+    // 1. Chercher si la conversation existe déjà
+    const { data: existingConv } = await db.from('conversations')
+      .select('id')
+      .eq('listing_id', listing_id)
+      .eq('client_id', clientId)
+      .eq('partner_id', partnerId)
+      .maybeSingle();
+
+    if (existingConv?.id) {
+      // ✅ Conversation existe déjà → on la réutilise
+      conversationId = existingConv.id;
+    } else {
+      // ✅ Pas encore de conversation → on la crée
+      const { data: newConv, error: createErr } = await db.from('conversations')
+        .insert({
           listing_id: listing_id,
           client_id:  clientId,
           partner_id: partnerId,
-        },
-        {
-          onConflict: 'listing_id,client_id,partner_id',
-          ignoreDuplicates: false, // pour qu'il retourne la ligne existante
-        }
-      )
-      .select('id')
-      .single();
+        })
+        .select('id')
+        .single();
 
-    if (convErr) {
-      console.log('[Messages] Conversation upsert error (non-blocking):', convErr.message);
-      // On continue quand même : le message s'insère, conversation_id=NULL acceptable
-    } else if (convUpsert?.id) {
-      conversationId = convUpsert.id;
+      if (createErr) {
+        // Race condition possible si 2 messages envoyés en parallèle.
+        // Le UNIQUE constraint a probablement rejeté l'INSERT.
+        // → on re-cherche la conversation qui vient d'être créée par l'autre requête
+        if (createErr.code === '23505') { // unique_violation
+          const { data: raceConv } = await db.from('conversations')
+            .select('id')
+            .eq('listing_id', listing_id)
+            .eq('client_id', clientId)
+            .eq('partner_id', partnerId)
+            .maybeSingle();
+          if (raceConv?.id) {
+            conversationId = raceConv.id;
+          }
+        } else {
+          console.log('[Messages] Conversation create error (non-blocking):', createErr.message);
+        }
+      } else if (newConv?.id) {
+        conversationId = newConv.id;
+      }
     }
   } catch (e) {
     console.log('[Messages] Conversation flow error (non-blocking):', e.message);
