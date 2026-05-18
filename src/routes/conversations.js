@@ -251,4 +251,180 @@ router.get('/unread/count', authenticate, asyncHandler(async (req, res) => {
 }));
 
 
+// ═══════════════════════════════════════════════════════════════════════════
+// POST /api/conversations/:id/messages
+// Envoyer un message dans une conversation existante (ULTRA-PRO endpoint)
+//
+// → URL REST standard industrie (WhatsApp, Slack, Discord pattern)
+// → conversation_id identifie la conversation (pas besoin de booking_id)
+// → Privacy garantie : backend vérifie que req.user fait partie de la conv
+// → Receiver auto-déterminé (l'autre participant de la conv)
+// ═══════════════════════════════════════════════════════════════════════════
+router.post('/:id/messages', authenticate, asyncHandler(async (req, res) => {
+  const { id: conversationId } = req.params;
+  const { content } = req.body;
+  const senderId = req.user.id;
+  const L = await i18n.getUserLang(senderId);
+
+  // 1. Validations basiques
+  if (!content?.trim()) {
+    return res.status(400).json({ error: await i18n.t('messages_error_empty', L, 'Message vide') });
+  }
+  if (content.length > 2000) {
+    return res.status(400).json({ error: await i18n.t('messages_error_too_long', L, 'Message trop long (max 2000 caractères)') });
+  }
+
+  // 2. Récupérer la conversation + vérifier que l'user en fait partie
+  const { data: conversation, error: convErr } = await db.from('conversations')
+    .select('id, listing_id, client_id, partner_id')
+    .eq('id', conversationId)
+    .single();
+
+  if (convErr || !conversation) {
+    return res.status(404).json({ error: await i18n.t('conversations_error_not_found', L, 'Conversation introuvable') });
+  }
+
+  // 3. Vérifier que le sender est bien client OU partner de cette conversation (sécurité)
+  if (conversation.client_id !== senderId && conversation.partner_id !== senderId) {
+    return res.status(403).json({ error: await i18n.t('conversations_error_forbidden', L, 'Accès refusé à cette conversation') });
+  }
+
+  // 4. Déterminer automatiquement le receiver (l'autre participant)
+  const receiverId = (senderId === conversation.client_id)
+    ? conversation.partner_id
+    : conversation.client_id;
+
+  // 5. Anti self-message (ne devrait jamais arriver mais sécurité)
+  if (senderId === receiverId) {
+    return res.status(400).json({
+      error: await i18n.t('messages_error_self_message', L, 'Impossible de s\'envoyer un message à soi-même')
+    });
+  }
+
+  // 6. Insérer le message (lié à la conversation_id existante)
+  const { data: message, error: msgErr } = await db.from('messages')
+    .insert({
+      listing_id:      conversation.listing_id,
+      conversation_id: conversationId,
+      sender_id:       senderId,
+      receiver_id:     receiverId,
+      content:         content.trim(),
+      // booking_id reste NULL — pas nécessaire avec l'architecture conversation
+    })
+    .select(`
+      *,
+      sender:users!sender_id(id, name, avatar),
+      receiver:users!receiver_id(id, name, avatar)
+    `)
+    .single();
+
+  if (msgErr) {
+    console.log('[Conversations] Message insert error:', msgErr.message);
+    return res.status(500).json({ error: msgErr.message });
+  }
+
+  // 7. Mettre à jour la conversation (last_message + unread compteur)
+  try {
+    const isReceiverClient = (receiverId === conversation.client_id);
+    const previewText = content.trim().slice(0, 100);
+
+    // Récupérer compteurs actuels
+    const { data: convNow } = await db.from('conversations')
+      .select('unread_for_client, unread_for_partner')
+      .eq('id', conversationId)
+      .single();
+
+    await db.from('conversations')
+      .update({
+        last_message_at:      new Date().toISOString(),
+        last_message_preview: previewText,
+        last_message_sender:  senderId,
+        unread_for_client:    isReceiverClient ? (convNow?.unread_for_client ?? 0) + 1 : (convNow?.unread_for_client ?? 0),
+        unread_for_partner:   !isReceiverClient ? (convNow?.unread_for_partner ?? 0) + 1 : (convNow?.unread_for_partner ?? 0),
+        updated_at:           new Date().toISOString(),
+      })
+      .eq('id', conversationId);
+  } catch (e) {
+    console.log('[Conversations] Conversation update error (non-blocking):', e.message);
+  }
+
+  // 8. Push notification au receiver (avec i18n dans sa langue préférée)
+  try {
+    const receiverLang = await i18n.getUserLang(receiverId);
+    const t = (key, lang, fallback) => i18n.t(key, lang, fallback);
+
+    // Récupérer nom du sender
+    const senderName = req.user.name
+      || message.sender?.name
+      || await t('notif_someone', receiverLang, 'Quelqu\'un');
+
+    const titlePrefix = await t('notif_title_prefix', receiverLang, 'Message de');
+    const title = `${titlePrefix} ${senderName}`;
+    const preview = content.length > 50 ? content.slice(0, 50) + '...' : content;
+
+    // Insérer notification DB
+    try {
+      await db.from('notifications').insert({
+        user_id: receiverId,
+        title,
+        body:    preview,
+        type:    'message',
+        data:    JSON.stringify({
+          conversation_id: conversationId,
+          listing_id:      conversation.listing_id,
+          message_id:      message.id,
+          sender_id:       senderId,
+        }),
+      });
+    } catch (e) {
+      console.log('[Conversations] Notification DB error:', e.message);
+    }
+
+    // Envoyer push Expo
+    try {
+      const { data: tokenRow } = await db.from('push_tokens')
+        .select('expo_push_token')
+        .eq('user_id', receiverId)
+        .maybeSingle();
+
+      if (tokenRow?.expo_push_token) {
+        const expoPushToken = tokenRow.expo_push_token;
+        if (expoPushToken.startsWith('ExponentPushToken[') || expoPushToken.startsWith('ExpoPushToken[')) {
+          await fetch('https://exp.host/--/api/v2/push/send', {
+            method:  'POST',
+            headers: {
+              'Accept':       'application/json',
+              'Content-Type': 'application/json',
+              'host':         'exp.host',
+            },
+            body: JSON.stringify({
+              to:    expoPushToken,
+              title,
+              body:  preview,
+              data:  {
+                type:            'message',
+                conversation_id: conversationId,
+                listing_id:      conversation.listing_id,
+                message_id:      message.id,
+                sender_id:       senderId,
+              },
+              sound:    'default',
+              priority: 'high',
+              badge:    1,
+            }),
+          });
+        }
+      }
+    } catch (e) {
+      console.log('[Conversations] Push send error:', e.message);
+    }
+  } catch (e) {
+    console.log('[Conversations] Notification flow error (non-blocking):', e.message);
+  }
+
+  // 9. Retourner le message créé
+  res.status(201).json({ message });
+}));
+
+
 module.exports = router;
