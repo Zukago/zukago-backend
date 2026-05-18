@@ -21,7 +21,7 @@
 
 const express = require('express');
 const router  = express.Router();
-const { db }  = require('../config/supabase');
+const db = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
 const i18n    = require('../services/i18nService');
