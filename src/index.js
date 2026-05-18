@@ -74,6 +74,7 @@ app.use('/api/uploads',       require('./routes/uploads'));
 app.use('/api/places',        require('./routes/places'));
 app.use('/api/carpool',       require('./routes/carpool'));   // ✅ V9 : covoiturage
 app.use('/api/messages',      require('./routes/messages'));  // ✅ V14.3 : chat in-app
+app.use('/api/conversations', require('./routes/conversations'));  // ✅ V14.7.0 : nouveaux endpoints conversations (strangler pattern)
 
 // Health check
 app.get('/health', (req, res) => {

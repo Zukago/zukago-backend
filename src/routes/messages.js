@@ -337,14 +337,56 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
     });
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  // ✅ V14.7.0 — Architecture Conversations (strangler pattern)
+  // → Avant d'insérer le message, on s'assure qu'une conversation existe
+  //   pour le triplet (listing_id, client_id, partner_id).
+  // → Si elle n'existe pas → on la crée.
+  // → Si elle existe → on récupère son id.
+  // → Le message qu'on va insérer aura conversation_id rempli (cohérence DB).
+  // ═══════════════════════════════════════════════════════════════════════
+  let conversationId = null;
+  try {
+    // Identifier qui est client et qui est partner dans cette conversation
+    const clientId  = (senderId === partnerUserId) ? receiverId : senderId;
+    const partnerId = partnerUserId;
+
+    // Upsert : insère si n'existe pas, sinon ne fait rien (grâce au UNIQUE constraint)
+    const { data: convUpsert, error: convErr } = await db.from('conversations')
+      .upsert(
+        {
+          listing_id: listing_id,
+          client_id:  clientId,
+          partner_id: partnerId,
+        },
+        {
+          onConflict: 'listing_id,client_id,partner_id',
+          ignoreDuplicates: false, // pour qu'il retourne la ligne existante
+        }
+      )
+      .select('id')
+      .single();
+
+    if (convErr) {
+      console.log('[Messages] Conversation upsert error (non-blocking):', convErr.message);
+      // On continue quand même : le message s'insère, conversation_id=NULL acceptable
+    } else if (convUpsert?.id) {
+      conversationId = convUpsert.id;
+    }
+  } catch (e) {
+    console.log('[Messages] Conversation flow error (non-blocking):', e.message);
+    // Fallback : on continue sans conversation_id (rétrocompat préservée)
+  }
+
   // Insérer le message
   const { data: message, error } = await db.from('messages')
     .insert({
       listing_id,
-      booking_id:  booking_id || null,
-      sender_id:   senderId,
-      receiver_id: receiverId,
-      content:     content.trim(),
+      booking_id:      booking_id || null,
+      sender_id:       senderId,
+      receiver_id:     receiverId,
+      content:         content.trim(),
+      conversation_id: conversationId, // ✅ V14.7.0 lien vers conversation (NULL si fallback échec)
     })
     .select(`
       *,
@@ -356,6 +398,36 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
   if (error) {
     console.log('[Messages] Insert error:', error.message);
     return res.status(500).json({ error: error.message });
+  }
+
+  // ✅ V14.7.0 — Mettre à jour la conversation (last_message + unread)
+  //   APRÈS l'INSERT réussi du message (sinon on crée une conversation orpheline)
+  if (conversationId) {
+    try {
+      // Déterminer qui est le receiver côté conversation
+      const isReceiverClient = (receiverId !== partnerUserId);
+      const previewText = content.trim().slice(0, 100);
+
+      // Récupérer la conversation actuelle pour incrémenter le bon compteur
+      const { data: convNow } = await db.from('conversations')
+        .select('unread_for_client, unread_for_partner')
+        .eq('id', conversationId)
+        .single();
+
+      await db.from('conversations')
+        .update({
+          last_message_at:      new Date().toISOString(),
+          last_message_preview: previewText,
+          last_message_sender:  senderId,
+          unread_for_client:    isReceiverClient ? (convNow?.unread_for_client ?? 0) + 1 : (convNow?.unread_for_client ?? 0),
+          unread_for_partner:   !isReceiverClient ? (convNow?.unread_for_partner ?? 0) + 1 : (convNow?.unread_for_partner ?? 0),
+          updated_at:           new Date().toISOString(),
+        })
+        .eq('id', conversationId);
+    } catch (e) {
+      console.log('[Messages] Conversation update error (non-blocking):', e.message);
+      // Le message est déjà inséré, l'aperçu pourra être recalculé plus tard
+    }
   }
 
   // ═══ NOTIFICATIONS MULTILINGUES (DB + Push Expo) ═══════════════════════
