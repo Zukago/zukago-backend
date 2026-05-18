@@ -165,11 +165,13 @@ router.post('/quote', authenticate, [
   if (!listing) return res.status(404).json({ error: 'Annonce introuvable ou inactive' });
 
   // Calcul prix via pricingService
+  // ✅ V14.7.0 Bug F : passer la langue user pour traduire les labels breakdown
   let calc;
   try {
     // Inject partner_id pour que pricingService trouve un éventuel taux custom
     const listingWithPartner = { ...listing, partner_id: listing.partners?.id };
-    calc = await pricingService.calculate(listingWithPartner, req.body);
+    const L = await i18n.getUserLang(req.user.id);
+    calc = await pricingService.calculate(listingWithPartner, req.body, L);
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }
@@ -226,10 +228,12 @@ router.post('/', authenticate, [
   }
 
   // ── Calcul prix via pricingService (V13)
+  // ✅ V14.7.0 Bug F : passer la langue user pour traduire les labels breakdown
   let calc;
   try {
     const listingWithPartner = { ...listing, partner_id: listing.partners?.id };
-    calc = await pricingService.calculate(listingWithPartner, req.body);
+    const L = await i18n.getUserLang(req.user.id);
+    calc = await pricingService.calculate(listingWithPartner, req.body, L);
   } catch (e) {
     return res.status(400).json({ error: e.message });
   }

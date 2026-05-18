@@ -22,6 +22,7 @@
  */
 
 const db = require('../config/database');
+const i18n = require('./i18nService');  // ✅ V14.7.0 Bug F : i18n pour les labels breakdown
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HELPERS PRIVÉS
@@ -77,7 +78,8 @@ const r = (n) => Math.round(Number(n) || 0);
 //   1) Calcule jour-par-jour avec price_weekend pour ven/sam/dim
 //   2) Calcule chaque palier défini (5nights, week, month) si éligible
 //   3) Prend le MOINS CHER (avantage client)
-function calculateApt(listing, params) {
+// ✅ V14.7.0 Bug F : ajout param `lang` pour traduction labels breakdown
+async function calculateApt(listing, params, lang = 'fr') {
   // ✅ V13.1 : sécuriser params null/undefined
   const p = params || {};
   const { start_date, end_date } = p;
@@ -108,31 +110,34 @@ function calculateApt(listing, params) {
   }
 
   // ── Liste des paliers candidats (uniquement ceux définis ET éligibles)
+  // ✅ V14.7.0 Bug F : labels traduits via i18n.t() avec placeholders {base} {weekend} {n}
+  const dailyLabel = weekendCount > 0
+    ? await i18n.t('pricing_apt_daily_with_weekend', lang, '{base} nuit(s) base + {weekend} nuit(s) weekend', { base: nights - weekendCount, weekend: weekendCount })
+    : await i18n.t('pricing_apt_daily_base',         lang, '{n} nuit(s) au tarif base', { n: nights });
+
   const candidates = [
-    { name: 'daily',   total: dailySum, label: weekendCount > 0
-        ? `${nights - weekendCount} nuit(s) base + ${weekendCount} nuit(s) weekend`
-        : `${nights} nuit(s) au tarif base` },
+    { name: 'daily', total: dailySum, label: dailyLabel },
   ];
 
   if (price5 > 0 && nights >= 5) {
     candidates.push({
       name: '5nights',
       total: r(nights * price5 / 5),
-      label: `Tarif 5 nuits appliqué (${nights} nuit(s))`,
+      label: await i18n.t('pricing_apt_tarif_5nights', lang, 'Tarif 5 nuits appliqué ({n} nuit(s))', { n: nights }),
     });
   }
   if (priceWeek > 0 && nights >= 7) {
     candidates.push({
       name: 'week',
       total: r(nights * priceWeek / 7),
-      label: `Tarif semaine appliqué (${nights} nuit(s))`,
+      label: await i18n.t('pricing_apt_tarif_week', lang, 'Tarif semaine appliqué ({n} nuit(s))', { n: nights }),
     });
   }
   if (priceMonth > 0 && nights >= 30) {
     candidates.push({
       name: 'month',
       total: r(nights * priceMonth / 30),
-      label: `Tarif mensuel appliqué (${nights} nuit(s))`,
+      label: await i18n.t('pricing_apt_tarif_month', lang, 'Tarif mensuel appliqué ({n} nuit(s))', { n: nights }),
     });
   }
 
@@ -151,7 +156,8 @@ function calculateApt(listing, params) {
 // ─── 🏨 HOTEL ──────────────────────────────────────────────────────────────
 // params: { start_date, end_date, room_type_id }
 // Logique : prix sur la room_type, jour-par-jour, ignore prix du listing
-async function calculateHotel(listing, params) {
+// ✅ V14.7.0 Bug F : ajout param `lang` pour traduction labels breakdown
+async function calculateHotel(listing, params, lang = 'fr') {
   // ✅ V13.1 : sécuriser params null/undefined
   const p = params || {};
   const { start_date, end_date, room_type_id } = p;
@@ -197,9 +203,10 @@ async function calculateHotel(listing, params) {
     }
   }
 
+  // ✅ V14.7.0 Bug F : labels traduits via i18n.t() avec placeholders
   const label = weekendCount > 0
-    ? `${roomName} : ${nights - weekendCount} nuit(s) base + ${weekendCount} nuit(s) weekend`
-    : `${roomName} : ${nights} nuit(s)`;
+    ? await i18n.t('pricing_hotel_with_weekend', lang, '{room} : {base} nuit(s) base + {weekend} nuit(s) weekend', { room: roomName, base: nights - weekendCount, weekend: weekendCount })
+    : await i18n.t('pricing_hotel_base',         lang, '{room} : {n} nuit(s)', { room: roomName, n: nights });
 
   return {
     unit_type: 'night',
@@ -217,7 +224,8 @@ async function calculateHotel(listing, params) {
 //   2) Si with_driver=true ET driver_supplement défini → daily += supplement
 //   3) subtotal = daily × days
 //   4) Si days >= 7 ET long_rental_discount_pct → réduction sur le total
-function calculateCar(listing, params) {
+// ✅ V14.7.0 Bug F : async + ajout param `lang` pour traduction labels breakdown
+async function calculateCar(listing, params, lang = 'fr') {
   // ✅ V13.1 : sécuriser params null/undefined
   const p = params || {};
   const { start_date, end_date, with_driver, zone } = p;
@@ -257,13 +265,27 @@ function calculateCar(listing, params) {
   // 3) Subtotal de base
   let subtotal = dailyWithDriver * days;
 
+  // ✅ V14.7.0 Bug F : labels traduits via i18n.t()
   const breakdown = [];
-  const zoneLabel = zone === 'in_city'  ? ' (en ville)'
-                  : zone === 'out_city' ? ' (hors ville)'
+  const zoneLabel = zone === 'in_city'
+                  ? await i18n.t('pricing_car_zone_in_city',  lang, ' (en ville)')
+                  : zone === 'out_city'
+                  ? await i18n.t('pricing_car_zone_out_city', lang, ' (hors ville)')
                   : '';
-  const driverLabel = with_driver ? ' avec chauffeur' : '';
+  const driverLabel = with_driver
+                    ? await i18n.t('pricing_car_with_driver', lang, ' avec chauffeur')
+                    : '';
+  const suppText = (driverSupp && with_driver)
+                 ? await i18n.t('pricing_car_supplement_suffix', lang, ' + {supp} suppl.', { supp: driverSupp.toLocaleString() })
+                 : '';
   breakdown.push({
-    label: `${days} jour(s)${zoneLabel}${driverLabel} × ${daily.toLocaleString()}${driverSupp && with_driver ? ` + ${driverSupp.toLocaleString()} suppl.` : ''}`,
+    label: await i18n.t('pricing_car_main_line', lang, '{days} jour(s){zone}{driver} × {price}{supp}', {
+      days,
+      zone:   zoneLabel,
+      driver: driverLabel,
+      price:  daily.toLocaleString(),
+      supp:   suppText,
+    }),
     amount: subtotal,
   });
 
@@ -273,7 +295,7 @@ function calculateCar(listing, params) {
     discountAmount = r(subtotal * discountPct / 100);
     subtotal -= discountAmount;
     breakdown.push({
-      label: `Remise longue durée -${discountPct}%`,
+      label: await i18n.t('pricing_car_long_rental_discount', lang, 'Remise longue durée -{pct}%', { pct: discountPct }),
       amount: -discountAmount,
     });
   }
@@ -296,7 +318,8 @@ function calculateCar(listing, params) {
 //      - 'halfday' → price_halfday (forfait 4h, ignore unit_count)
 //      - 'day'     → unit_count × price
 //   3) airport_fee s'ajoute TOUJOURS si demandé (même en longdistance)
-function calculateDriver(listing, params) {
+// ✅ V14.7.0 Bug F : async + ajout param `lang` pour traduction labels breakdown
+async function calculateDriver(listing, params, lang = 'fr') {
   // ✅ V13.1 fix : default = {} ne couvre que undefined, pas null
   const unit_type  = params?.unit_type;
   const unit_count = params?.unit_count;
@@ -322,7 +345,10 @@ function calculateDriver(listing, params) {
     subtotal = priceLongdist;
     resolvedUnitType = 'longdistance';
     resolvedUnitCount = 1;
-    breakdown.push({ label: 'Trajet longue distance (forfait)', amount: priceLongdist });
+    breakdown.push({
+      label: await i18n.t('pricing_driver_longdistance', lang, 'Trajet longue distance (forfait)'),
+      amount: priceLongdist,
+    });
   }
   // 2) Sinon selon unit_type
   else if (unit_type === 'hour') {
@@ -330,7 +356,10 @@ function calculateDriver(listing, params) {
     if (resolvedUnitCount < 1) throw new Error('Nombre d\'heures invalide');
     subtotal = priceHour * resolvedUnitCount;
     breakdown.push({
-      label: `${resolvedUnitCount} heure(s) × ${priceHour.toLocaleString()}`,
+      label: await i18n.t('pricing_driver_hours', lang, '{n} heure(s) × {price}', {
+        n: resolvedUnitCount,
+        price: priceHour.toLocaleString(),
+      }),
       amount: subtotal,
     });
   }
@@ -338,14 +367,20 @@ function calculateDriver(listing, params) {
     if (priceHalfday <= 0) throw new Error('Tarif demi-journée non défini');
     subtotal = priceHalfday;
     resolvedUnitCount = 1;
-    breakdown.push({ label: 'Demi-journée (4h)', amount: priceHalfday });
+    breakdown.push({
+      label: await i18n.t('pricing_driver_halfday', lang, 'Demi-journée (4h)'),
+      amount: priceHalfday,
+    });
   }
   else if (unit_type === 'day') {
     if (priceDay <= 0) throw new Error('Tarif journée non défini');
     if (resolvedUnitCount < 1) throw new Error('Nombre de jours invalide');
     subtotal = priceDay * resolvedUnitCount;
     breakdown.push({
-      label: `${resolvedUnitCount} jour(s) × ${priceDay.toLocaleString()}`,
+      label: await i18n.t('pricing_driver_days', lang, '{n} jour(s) × {price}', {
+        n: resolvedUnitCount,
+        price: priceDay.toLocaleString(),
+      }),
       amount: subtotal,
     });
   }
@@ -356,7 +391,10 @@ function calculateDriver(listing, params) {
   // 3) Frais aéroport (s'ajoutent toujours, même en longdistance)
   if (extras.airport_fee === true && airportFee > 0) {
     subtotal += airportFee;
-    breakdown.push({ label: 'Frais aéroport', amount: airportFee });
+    breakdown.push({
+      label: await i18n.t('pricing_driver_airport_fee', lang, 'Frais aéroport'),
+      amount: airportFee,
+    });
   }
 
   return {
@@ -371,7 +409,8 @@ function calculateDriver(listing, params) {
 // ─── 🚙 CARPOOL ────────────────────────────────────────────────────────────
 // params: { seats_booked }
 // Logique : seats × price (commission spéciale 8% appliquée plus haut)
-function calculateCarpool(listing, params) {
+// ✅ V14.7.0 Bug F : async + ajout param `lang` pour traduction labels breakdown
+async function calculateCarpool(listing, params, lang = 'fr') {
   // ✅ V13.1 : sécuriser params null/undefined
   const p = params || {};
   const { seats_booked } = p;
@@ -393,7 +432,11 @@ function calculateCarpool(listing, params) {
     unit_count: seats,
     subtotal,
     breakdown: [{
-      label: `${seats} place(s) × ${pricePerSeat.toLocaleString()}`,
+      // ✅ V14.7.0 Bug F : label traduit via i18n.t()
+      label: await i18n.t('pricing_carpool_seats', lang, '{n} place(s) × {price}', {
+        n: seats,
+        price: pricePerSeat.toLocaleString(),
+      }),
       amount: subtotal,
     }],
     meta: { seats_booked: seats },
@@ -411,23 +454,25 @@ class PricingService {
    *
    * @param {Object} listing  Objet listing complet (avec partner_id si possible)
    * @param {Object} params   Paramètres de la réservation côté client
+   * @param {string} [lang]   Langue de l'utilisateur ('fr'|'en'|'de'), default 'fr'
    * @returns {Object}        { unit_type, unit_count, subtotal, breakdown,
    *                            serviceFee, serviceFeeRate, total,
    *                            commission, commissionRate, partnerGets, meta }
    */
-  async calculate(listing, params = {}) {
+  async calculate(listing, params = {}, lang = 'fr') {
     if (!listing || !listing.type) {
       throw new Error('Listing invalide ou type manquant');
     }
 
     // ── 1) Calcul subtotal selon le type
+    // ✅ V14.7.0 Bug F : toutes les fonctions sont async maintenant + reçoivent lang
     let core;
     switch (listing.type) {
-      case 'apt':    core = calculateApt(listing, params);              break;
-      case 'hotel':  core = await calculateHotel(listing, params);       break;
-      case 'car':    core = calculateCar(listing, params);              break;
-      case 'driver': core = calculateDriver(listing, params);           break;
-      case 'cov':    core = calculateCarpool(listing, params);          break;
+      case 'apt':    core = await calculateApt(listing, params, lang);     break;
+      case 'hotel':  core = await calculateHotel(listing, params, lang);   break;
+      case 'car':    core = await calculateCar(listing, params, lang);     break;
+      case 'driver': core = await calculateDriver(listing, params, lang);  break;
+      case 'cov':    core = await calculateCarpool(listing, params, lang); break;
       default:
         throw new Error(`Type de service inconnu : ${listing.type}`);
     }
