@@ -172,6 +172,12 @@ router.get('/conversation/:listingId', authenticate, asyncHandler(async (req, re
   // ✅ V14.5.3 i18n : résoudre la langue de l'user pour les errors
   const L = await i18n.getUserLang(userId);
 
+  // ✅ V14.6.1 — Fix Bug #1 Privacy : accepter other_user_id en query param
+  // → Quand le partner ouvre une conversation pour un listing,
+  //   il DOIT préciser avec quel client il veut discuter (sinon mélange des threads)
+  // → Quand le client ouvre, il n'a pas besoin de préciser (le partner est unique)
+  const otherUserIdFromQuery = req.query.other_user_id || null;
+
   // Récupérer le listing avec partner.user_id
   const { data: listing, error: lErr } = await db.from('listings')
     .select('id, type, title, partner_id, partners!inner(user_id)')
@@ -189,17 +195,18 @@ router.get('/conversation/:listingId', authenticate, asyncHandler(async (req, re
 
   // Identifier l'autre participant
   const isPartner = (userId === partnerUserId);
-  let otherUserId = isPartner ? null : partnerUserId;
+  let otherUserId = isPartner ? otherUserIdFromQuery : partnerUserId;
 
-  // Filtre OR
-  let filter;
-  if (otherUserId) {
-    // Cas client : récupère messages entre user et partenaire
-    filter = `and(sender_id.eq.${userId},receiver_id.eq.${otherUserId}),and(sender_id.eq.${otherUserId},receiver_id.eq.${userId})`;
-  } else {
-    // Cas partenaire : récupère TOUS les messages où il est sender ou receiver
-    filter = `sender_id.eq.${userId},receiver_id.eq.${userId}`;
+  // ✅ V14.6.1 — Validation : si partner sans other_user_id → erreur 400
+  // → Avant ce fix, le partner voyait TOUS les messages mélangés (privacy leak)
+  if (isPartner && !otherUserId) {
+    return res.status(400).json({
+      error: await i18n.t('messages_error_other_user_required', L, "other_user_id requis quand le partenaire ouvre une conversation")
+    });
   }
+
+  // Filtre OR — TOUJOURS strict maintenant (plus de mélange)
+  const filter = `and(sender_id.eq.${userId},receiver_id.eq.${otherUserId}),and(sender_id.eq.${otherUserId},receiver_id.eq.${userId})`;
 
   // Récupérer messages
   const { data: messages, error } = await db.from('messages')
