@@ -483,6 +483,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
           message_id: message.id,
           sender_id:  senderId,
           booking_id: booking_id || null,
+          conversation_id: conversationId || null, // ✅ V14.7.0 — Deep linking ULTRA-PRO (auto-ouvre Chat)
         }),
       });
     } catch (e) {
@@ -496,6 +497,7 @@ router.post('/', authenticate, asyncHandler(async (req, res) => {
       message_id: message.id,
       sender_id:  senderId,
       booking_id: booking_id || null,
+      conversation_id: conversationId || null, // ✅ V14.7.0 — Deep linking ULTRA-PRO (frontend ouvre Chat direct)
     });
   } catch (e) {
     console.log('[Messages] Notification flow error:', e.message);
