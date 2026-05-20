@@ -262,7 +262,10 @@ router.get('/verify-email', asyncHandler(async (req, res) => {
   }
 
   await db.from('users').update({
-    verified:       true,
+    // ✅ V14.7.1 Bug fix — Retiré `verified: true` (régression critique)
+    //    `verified` = badge KYC (validé par admin uniquement)
+    //    `email_verified` = email confirmé (set ici)
+    //    Mettre `verified: true` ici donnerait le badge KYC à TOUS les users dès la vérif email.
     email_verified: true,
     verify_token:   null,
     verify_expires: null,
