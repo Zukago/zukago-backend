@@ -800,10 +800,9 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
 
   const { amenities, room_types, city_name, ...updates } = req.body;
   if (!isAdmin) delete updates.status; // partenaire ne peut pas changer le statut
-  // ✅ V14.8 — Édition : mapper le libellé ville vers la vraie colonne city_label
-  //    (cohérent avec la création). On sort aussi city_name/room_types/amenities du
-  //    spread pour ne pas écrire de colonnes inexistantes ('city_name', 'room_types').
-  if (city_name !== undefined) updates.city_label = city_name;
+  // ✅ V14.8 — Édition : la table 'listings' ne stocke QUE city_code (le libellé vient
+  //    de la table 'cities'). On retire city_name (libellé) + room_types/amenities du
+  //    spread pour ne pas écrire de colonnes inexistantes. city_code reste dans ...updates.
 
   const { data, error } = await db.from('listings')
     .update({ ...updates, updated_at: new Date() })
