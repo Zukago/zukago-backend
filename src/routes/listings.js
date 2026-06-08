@@ -798,8 +798,12 @@ router.patch('/:id', authenticate, asyncHandler(async (req, res) => {
   const isAdmin = req.user.role === 'admin';
   if (!isOwner && !isAdmin) return res.status(403).json({ error: await i18n.t('listings_error_unauthorized', L, 'Non autorisé') });
 
-  const { amenities, ...updates } = req.body;
+  const { amenities, room_types, city_name, ...updates } = req.body;
   if (!isAdmin) delete updates.status; // partenaire ne peut pas changer le statut
+  // ✅ V14.8 — Édition : mapper le libellé ville vers la vraie colonne city_label
+  //    (cohérent avec la création). On sort aussi city_name/room_types/amenities du
+  //    spread pour ne pas écrire de colonnes inexistantes ('city_name', 'room_types').
+  if (city_name !== undefined) updates.city_label = city_name;
 
   const { data, error } = await db.from('listings')
     .update({ ...updates, updated_at: new Date() })
