@@ -328,7 +328,91 @@ router.get('/:id/availability', asyncHandler(async (req, res) => {
     }
   });
 
+  // ✅ V14.8 — Blocages manuels du propriétaire, fusionnés dans bookedDates
+  //    Convention INCLUSIVE : bloqué du 4 au 6 = 4, 5 ET 6 indisponibles.
+  //    PURE ADD : ne touche pas au calcul des bookings ci-dessus.
+  try {
+    const { data: blocks } = await db.from('listing_blocked_dates')
+      .select('start_date, end_date')
+      .eq('listing_id', req.params.id);
+    (blocks || []).forEach(b => {
+      if (!b.start_date || !b.end_date) return;
+      const bStart = new Date(b.start_date);
+      const bEnd   = new Date(b.end_date);
+      for (let d = new Date(bStart); d <= bEnd; d.setDate(d.getDate() + 1)) {
+        bookedDates.push(d.toISOString().split('T')[0]);
+      }
+    });
+  } catch (e) { console.log('[GET /:id/availability] blocked_dates error:', e.message); }
+
   res.json({ bookedDates: [...new Set(bookedDates)] });
+}));
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ✅ V14.8 — Blocages manuels du propriétaire (calendrier partenaire)
+// ═══════════════════════════════════════════════════════════════════════════
+// Helper : l'annonce existe-t-elle et appartient-elle à l'user (ou admin) ?
+// Renvoie le listing si OK, sinon répond (404/403) et renvoie null.
+async function _assertListingOwner(req, res) {
+  const L = await i18n.getUserLang(req.user.id);
+  const { data: listing } = await db.from('listings')
+    .select('id, partner_id, partners(user_id)')
+    .eq('id', req.params.id)
+    .single();
+  if (!listing) {
+    res.status(404).json({ error: await i18n.t('listings_error_not_found', L, 'Annonce introuvable') });
+    return null;
+  }
+  const isOwner = listing.partners?.user_id === req.user.id;
+  const isAdmin = req.user.role === 'admin';
+  if (!isOwner && !isAdmin) {
+    res.status(403).json({ error: await i18n.t('listings_error_unauthorized', L, 'Non autorisé') });
+    return null;
+  }
+  return listing;
+}
+
+// ─── GET /api/listings/:id/blocks — Liste des blocages manuels (propriétaire) ──
+router.get('/:id/blocks', authenticate, asyncHandler(async (req, res) => {
+  const listing = await _assertListingOwner(req, res);
+  if (!listing) return;
+  const { data: blocks, error } = await db.from('listing_blocked_dates')
+    .select('id, start_date, end_date, reason, created_at')
+    .eq('listing_id', req.params.id)
+    .order('start_date', { ascending: true });
+  if (error) throw new Error(error.message);
+  res.json({ blocks: blocks || [] });
+}));
+
+// ─── POST /api/listings/:id/blocks — Créer un blocage (propriétaire) ───────────
+router.post('/:id/blocks', authenticate, asyncHandler(async (req, res) => {
+  const L = await i18n.getUserLang(req.user.id);
+  const listing = await _assertListingOwner(req, res);
+  if (!listing) return;
+  const { start_date, end_date, reason } = req.body;
+  if (!start_date || !end_date) {
+    return res.status(400).json({ error: await i18n.t('blocks_error_dates_required', L, 'Dates de début et de fin requises') });
+  }
+  if (new Date(end_date) < new Date(start_date)) {
+    return res.status(400).json({ error: await i18n.t('blocks_error_range_invalid', L, 'La date de fin doit être après la date de début') });
+  }
+  const { data, error } = await db.from('listing_blocked_dates')
+    .insert({ listing_id: req.params.id, start_date, end_date, reason: reason || null })
+    .select().single();
+  if (error) throw new Error(error.message);
+  res.status(201).json({ block: data });
+}));
+
+// ─── DELETE /api/listings/:id/blocks/:blockId — Supprimer un blocage ───────────
+router.delete('/:id/blocks/:blockId', authenticate, asyncHandler(async (req, res) => {
+  const listing = await _assertListingOwner(req, res);
+  if (!listing) return;
+  const { error } = await db.from('listing_blocked_dates')
+    .delete()
+    .eq('id', req.params.blockId)
+    .eq('listing_id', req.params.id);
+  if (error) throw new Error(error.message);
+  res.json({ success: true });
 }));
 
 // ─── GET /api/listings/:id/seats-available — Places restantes (covoit, calcul dynamique)
