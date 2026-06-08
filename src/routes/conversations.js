@@ -51,6 +51,8 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
       unread_for_partner,
       archived_by_client,
       archived_by_partner,
+      client_deleted_at,
+      partner_deleted_at,
       created_at,
       listing:listings!listing_id(
         id, type, title,
@@ -72,7 +74,16 @@ router.get('/', authenticate, asyncHandler(async (req, res) => {
     // Filtrer les archivées par moi
     .filter(c => {
       const iAmClient = (c.client_id === userId);
-      return iAmClient ? !c.archived_by_client : !c.archived_by_partner;
+      // Archivée par moi → masquer
+      if (iAmClient ? c.archived_by_client : c.archived_by_partner) return false;
+      // ✅ V14.8 — Soft-delete par utilisateur : masquer si supprimée par moi,
+      //    SAUF si un nouveau message est arrivé après (réapparition automatique).
+      const myDeletedAt = iAmClient ? c.client_deleted_at : c.partner_deleted_at;
+      if (myDeletedAt) {
+        const lastMsg = c.last_message_at ? new Date(c.last_message_at) : null;
+        if (!lastMsg || lastMsg <= new Date(myDeletedAt)) return false;
+      }
+      return true;
     })
     .map(c => {
       const iAmClient = (c.client_id === userId);
@@ -224,6 +235,39 @@ router.patch('/:id/read', authenticate, asyncHandler(async (req, res) => {
   await db.from('conversations')
     .update({ [updateField]: 0, updated_at: new Date().toISOString() })
     .eq('id', id);
+
+  res.json({ success: true });
+}));
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DELETE /api/conversations/:id
+// ✅ V14.8 — Soft-delete par utilisateur : masque la conversation pour CE user
+// uniquement. Les messages et la conversation restent en base (litiges/modération).
+// La conv réapparaît si un nouveau message arrive après la suppression.
+// ═══════════════════════════════════════════════════════════════════════════
+router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const userId = req.user.id;
+  const L = await i18n.getUserLang(userId);
+
+  const { data: conversation } = await db.from('conversations')
+    .select('client_id, partner_id')
+    .eq('id', id)
+    .single();
+
+  if (!conversation) {
+    return res.status(404).json({ error: await i18n.t('conversations_error_not_found', L, 'Conversation introuvable') });
+  }
+  if (conversation.client_id !== userId && conversation.partner_id !== userId) {
+    return res.status(403).json({ error: await i18n.t('conversations_error_forbidden', L, 'Accès refusé') });
+  }
+
+  const field = (conversation.client_id === userId) ? 'client_deleted_at' : 'partner_deleted_at';
+  const { error } = await db.from('conversations')
+    .update({ [field]: new Date().toISOString() })
+    .eq('id', id);
+  if (error) throw new Error(error.message);
 
   res.json({ success: true });
 }));
