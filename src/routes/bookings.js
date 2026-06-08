@@ -81,6 +81,26 @@ async function checkOverlap(listing, params) {
   const HOLD_DURATION_MIN = 30; // ⏱️ Durée du "hold" pour bookings pending non payés
   const holdCutoff = new Date(Date.now() - HOLD_DURATION_MIN * 60 * 1000).toISOString();
 
+  // ✅ V14.8 — Blocages manuels du propriétaire : bloquent TOUTE l'annonce
+  //    (tous types, toutes chambres). Convention INCLUSIVE côté blocage.
+  //    PURE ADD : vérif indépendante, avant le check des bookings.
+  {
+    let blockQuery = db.from('listing_blocked_dates')
+      .select('id')
+      .eq('listing_id', listing.id);
+    if (isDriver) {
+      // Driver jour : inclusif des deux côtés
+      blockQuery = blockQuery.lte('start_date', end_date).gte('end_date', start_date);
+    } else {
+      // Apt/hotel/car : la nuit de check-out reste libre (strict sur start), blocage inclusif sur end
+      blockQuery = blockQuery.lt('start_date', end_date).gte('end_date', start_date);
+    }
+    const { data: blocks } = await blockQuery;
+    if (blocks?.length) {
+      return { conflict: true, reason: 'Ces dates ne sont pas disponibles' };
+    }
+  }
+
   let query = db.from('bookings')
     .select('id, room_type_id, status, created_at')
     .eq('listing_id', listing.id)
