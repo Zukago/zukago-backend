@@ -453,6 +453,16 @@ router.patch('/listings/:id/feature', asyncHandler(async (req, res) => {
   res.json({ message: `Annonce ${featured ? 'mise en vedette' : 'retirée des vedettes'}` });
 }));
 
+// ✅ V14.8 — PATCH /api/admin/listings/:id/badge — Poser/retirer un badge éditorial
+router.patch('/listings/:id/badge', asyncHandler(async (req, res) => {
+  const ALLOWED = ['recommended', 'coup_de_coeur', 'nouveau', 'populaire'];
+  let { badge } = req.body;
+  // null / '' / valeur non autorisée → on retire le badge
+  if (!badge || !ALLOWED.includes(badge)) badge = null;
+  await db.from('listings').update({ admin_badge: badge }).eq('id', req.params.id);
+  res.json({ message: badge ? `Badge appliqué : ${badge}` : 'Badge retiré', admin_badge: badge });
+}));
+
 // ─── RETRAITS ─────────────────────────────────────────────────────────────────
 
 // GET /api/admin/withdrawals — Retraits en attente
