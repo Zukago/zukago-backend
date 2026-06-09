@@ -463,6 +463,16 @@ router.patch('/listings/:id/badge', asyncHandler(async (req, res) => {
   res.json({ message: badge ? `Badge appliqué : ${badge}` : 'Badge retiré', admin_badge: badge });
 }));
 
+// ✅ V14.8 — PATCH /api/admin/listings/:id/discount — Remise admin en % (0–90, 0 = aucune)
+router.patch('/listings/:id/discount', asyncHandler(async (req, res) => {
+  let pct = parseInt(req.body.discount_pct, 10);
+  if (isNaN(pct) || pct < 0) pct = 0;
+  if (pct > 90) pct = 90;
+  const value = pct > 0 ? pct : null; // 0 → null = pas de remise
+  await db.from('listings').update({ discount_pct: value }).eq('id', req.params.id);
+  res.json({ message: value ? `Remise ${value}% appliquée` : 'Remise retirée', discount_pct: value });
+}));
+
 // ─── RETRAITS ─────────────────────────────────────────────────────────────────
 
 // GET /api/admin/withdrawals — Retraits en attente

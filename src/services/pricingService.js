@@ -477,6 +477,17 @@ class PricingService {
         throw new Error(`Type de service inconnu : ${listing.type}`);
     }
 
+    // ── 1bis) ✅ V14.8 — Remise admin en % [Option A : commission sur prix remisé]
+    //   On réduit le sous-total AVANT serviceFee/total/commission → tout suit automatiquement.
+    //   (distincte de long_rental_discount_pct, déjà appliquée dans calculateCar)
+    const discountPct = Math.min(Math.max(Number(listing.discount_pct) || 0, 0), 90);
+    const originalSubtotal = core.subtotal;
+    let discountAmount = 0;
+    if (discountPct > 0) {
+      discountAmount = r(core.subtotal * discountPct / 100);
+      core.subtotal = core.subtotal - discountAmount;
+    }
+
     // ── 2) Frais de service (depuis app_config — V13 plus jamais hardcodé)
     const serviceFeeRate = await getConfigRate('service_fee_rate', 5);
     const serviceFee = r(core.subtotal * serviceFeeRate / 100);
@@ -515,6 +526,10 @@ class PricingService {
 
       // Montants (en FCFA, entiers)
       subtotal: core.subtotal,
+      // ✅ V14.8 — Remise admin (pour affichage prix barré côté frontend)
+      discountPct,
+      discountAmount,
+      originalSubtotal,
       serviceFee,
       total,
       commission,
