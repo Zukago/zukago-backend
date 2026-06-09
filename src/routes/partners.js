@@ -268,7 +268,7 @@ router.get('/listings', authenticate, asyncHandler(async (req, res) => {
   if (!partner) return res.json({ listings: [] });
 
   const { data: listings } = await db.from('listings')
-    .select('*, listing_photos(url, is_main)')
+    .select('*, listing_photos(url, is_main), listing_amenities(amenity_code), room_types:listing_room_types(*)')
     .eq('partner_id', partner.id)
     .order('created_at', { ascending: false });
 
