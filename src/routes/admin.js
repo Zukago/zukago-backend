@@ -582,21 +582,26 @@ router.delete('/banners/:id', asyncHandler(async (req, res) => {
 
 // POST /api/admin/notifications/send
 router.post('/notifications/send', asyncHandler(async (req, res) => {
-  const { title, body, target = 'all' } = req.body;
+  const { title, body, target = 'all', userIds = null } = req.body;
 
-  // Récupérer users selon target
-  let query = db.from('users').select('id, name, email').eq('active', true);
-  if (target === 'clients')  query = query.eq('role', 'client');
-  if (target === 'partners') query = query.eq('role', 'partner');
-
-  const { data: users } = await query;
+  let userIdList;
+  // ✅ V14.8 — Cible "utilisateurs sélectionnés" : on notifie EXACTEMENT ceux-là.
+  //    Si userIds fourni (non vide) → on l'utilise ; sinon logique groupée inchangée.
+  if (Array.isArray(userIds) && userIds.length > 0) {
+    userIdList = userIds;
+  } else {
+    // Récupérer users selon target (logique groupée existante)
+    let query = db.from('users').select('id').eq('active', true);
+    if (target === 'clients')  query = query.eq('role', 'client');
+    if (target === 'partners') query = query.eq('role', 'partner');
+    const { data: users } = await query;
+    userIdList = (users || []).map(u => u.id);
+  }
 
   // ✅ V14.5.4 : utilise notifyUsers (batch DB + push Expo en parallèle)
-  // Note : même message identique pour tous → batch OK
   let result = { db_ok: 0, push_ok: 0, total: 0 };
-  if (users?.length) {
-    const userIds = users.map(u => u.id);
-    result = await notifyUsers(userIds, {
+  if (userIdList.length) {
+    result = await notifyUsers(userIdList, {
       title,
       body,
       type: 'push',
@@ -604,8 +609,8 @@ router.post('/notifications/send', asyncHandler(async (req, res) => {
   }
 
   res.json({
-    message: `Notification envoyée à ${users?.length || 0} utilisateurs`,
-    count: users?.length || 0,
+    message: `Notification envoyée à ${userIdList.length} utilisateurs`,
+    count: userIdList.length,
     push_delivered: result.push_ok,
   });
 }));
