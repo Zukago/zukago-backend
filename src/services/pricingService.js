@@ -226,7 +226,14 @@ async function calculateHotel(listing, params, lang = 'fr') {
 //   4) Si days >= 7 ET long_rental_discount_pct → réduction sur le total
 // ✅ V14.7.0 Bug F : async + ajout param `lang` pour traduction labels breakdown
 async function calculateCar(listing, params, lang = 'fr') {
-  // ✅ V13.1 : sécuriser params null/undefined
+  // ✅ V14.8 — Refonte tarif voiture :
+  //   • jour comptés en nuits (cohérent appart/hôtel)
+  //   • prix/jour selon zone (en ville / hors ville)
+  //   • jour de week-end → MAX(prix week-end, tarif zone) ce jour-là
+  //   • paliers semaine/mois AU PRORATA (price_week/7, price_month/30) si saisis
+  //   • on garde le MOINS CHER (avantage client) : tarif jour vs semaine vs mois
+  //   • remise longue durée % : uniquement sur le tarif jour si ≥7j (jamais en plus d'un palier)
+  //   • supplément chauffeur : par jour, ajouté sur le mode choisi
   const p = params || {};
   const { start_date, end_date, with_driver, zone } = p;
   if (!start_date || !end_date) {
@@ -239,73 +246,112 @@ async function calculateCar(listing, params, lang = 'fr') {
   const basePrice    = Number(listing.price)              || 0;
   const priceInCity  = Number(listing.price_in_city)      || 0;
   const priceOutCity = Number(listing.price_out_city)     || 0;
+  const weekendPrice = Number(listing.price_weekend)      || 0;
+  const priceWeek    = Number(listing.price_week)         || 0;
+  const priceMonth   = Number(listing.price_month)        || 0;
   const driverSupp   = Number(listing.driver_supplement)  || 0;
   const discountPct  = Number(listing.long_rental_discount_pct) || 0;
 
-  // 1) Choix du prix selon zone
-  let daily = basePrice;
-  if (zone === 'in_city' && priceInCity > 0)        daily = priceInCity;
-  else if (zone === 'out_city' && priceOutCity > 0) daily = priceOutCity;
+  // 1) Tarif jour selon zone
+  let dailyZone = basePrice;
+  if (zone === 'in_city'  && priceInCity  > 0) dailyZone = priceInCity;
+  else if (zone === 'out_city' && priceOutCity > 0) dailyZone = priceOutCity;
+  if (dailyZone <= 0) throw new Error('Prix de la voiture non défini');
 
-  if (daily <= 0) throw new Error('Prix de la voiture non défini');
-
-  // 2) Supplément chauffeur si demandé ET disponible
-  let dailyWithDriver = daily;
+  // 2) Disponibilité chauffeur (sans/avec)
   if (with_driver === true) {
     if (!listing.with_driver) {
       throw new Error('Cette voiture n\'est pas disponible avec chauffeur');
     }
-    dailyWithDriver = daily + driverSupp;
   } else {
     if (!listing.without_driver) {
       throw new Error('Cette voiture n\'est disponible qu\'avec chauffeur');
     }
   }
 
-  // 3) Subtotal de base
-  let subtotal = dailyWithDriver * days;
+  // 3) Jour par jour : week-end = MAX(prix week-end, tarif zone) ce jour-là
+  const daysList = listNights(start_date, end_date);
+  let dailySum = 0, weekendCount = 0;
+  for (const d of daysList) {
+    if (weekendPrice > 0 && isWeekendDay(d)) {
+      dailySum += Math.max(weekendPrice, dailyZone);
+      weekendCount++;
+    } else {
+      dailySum += dailyZone;
+    }
+  }
 
-  // ✅ V14.7.0 Bug F : labels traduits via i18n.t()
+  // 4) Candidats (on prend le moins cher = avantage client)
+  //    Remise longue durée % : appliquée au tarif jour si ≥7j (jamais en plus d'un palier)
+  let dailyTotal = dailySum;
+  let dailyDiscountApplied = false;
+  if (days >= 7 && discountPct > 0) {
+    dailyTotal = r(dailySum * (1 - discountPct / 100));
+    dailyDiscountApplied = true;
+  }
+  const candidates = [{ name: 'daily', total: dailyTotal }];
+  if (priceWeek  > 0 && days >= 7)  candidates.push({ name: 'week',  total: r(days * priceWeek  / 7)  });
+  if (priceMonth > 0 && days >= 30) candidates.push({ name: 'month', total: r(days * priceMonth / 30) });
+  const best = candidates.reduce((a, b) => (b.total < a.total ? b : a));
+  let subtotal = best.total;
+
+  // 5) Supplément chauffeur (par jour, sur le mode choisi)
+  let driverAmount = 0;
+  if (with_driver === true && driverSupp > 0) {
+    driverAmount = driverSupp * days;
+  }
+
+  // 6) Breakdown traduit
   const breakdown = [];
   const zoneLabel = zone === 'in_city'
                   ? await i18n.t('pricing_car_zone_in_city',  lang, ' (en ville)')
                   : zone === 'out_city'
                   ? await i18n.t('pricing_car_zone_out_city', lang, ' (hors ville)')
                   : '';
-  const driverLabel = with_driver
-                    ? await i18n.t('pricing_car_with_driver', lang, ' avec chauffeur')
-                    : '';
-  const suppText = (driverSupp && with_driver)
-                 ? await i18n.t('pricing_car_supplement_suffix', lang, ' + {supp} suppl.', { supp: driverSupp.toLocaleString() })
-                 : '';
-  breakdown.push({
-    label: await i18n.t('pricing_car_main_line', lang, '{days} jour(s){zone}{driver} × {price}{supp}', {
-      days,
-      zone:   zoneLabel,
-      driver: driverLabel,
-      price:  daily.toLocaleString(),
-      supp:   suppText,
-    }),
-    amount: subtotal,
-  });
-
-  // 4) Remise longue durée (sur le total avec chauffeur)
-  let discountAmount = 0;
-  if (days >= 7 && discountPct > 0) {
-    discountAmount = r(subtotal * discountPct / 100);
-    subtotal -= discountAmount;
+  if (best.name === 'week') {
     breakdown.push({
-      label: await i18n.t('pricing_car_long_rental_discount', lang, 'Remise longue durée -{pct}%', { pct: discountPct }),
-      amount: -discountAmount,
+      label: await i18n.t('pricing_car_week_rate', lang, 'Tarif semaine — {days} jour(s){zone}', { days, zone: zoneLabel }),
+      amount: subtotal,
+    });
+  } else if (best.name === 'month') {
+    breakdown.push({
+      label: await i18n.t('pricing_car_month_rate', lang, 'Tarif mois — {days} jour(s){zone}', { days, zone: zoneLabel }),
+      amount: subtotal,
+    });
+  } else {
+    breakdown.push({
+      label: weekendCount > 0
+        ? await i18n.t('pricing_car_daily_weekend', lang, '{days} jour(s){zone} (dont {we} week-end)', { days, zone: zoneLabel, we: weekendCount })
+        : await i18n.t('pricing_car_daily', lang, '{days} jour(s){zone}', { days, zone: zoneLabel }),
+      amount: dailySum,
+    });
+    if (dailyDiscountApplied) {
+      breakdown.push({
+        label: await i18n.t('pricing_car_long_rental_discount', lang, 'Remise longue durée -{pct}%', { pct: discountPct }),
+        amount: -(dailySum - subtotal),
+      });
+    }
+  }
+  if (driverAmount > 0) {
+    breakdown.push({
+      label: await i18n.t('pricing_car_driver_supp', lang, 'Supplément chauffeur ({days} j × {supp})', { days, supp: driverSupp.toLocaleString() }),
+      amount: driverAmount,
     });
   }
+
+  subtotal += driverAmount;
 
   return {
     unit_type: 'day',
     unit_count: days,
     subtotal,
     breakdown,
-    meta: { with_driver: !!with_driver, zone: zone || null, discount_applied: discountAmount > 0 },
+    meta: {
+      with_driver: !!with_driver,
+      zone: zone || null,
+      pricing: best.name,
+      discount_applied: dailyDiscountApplied && best.name === 'daily',
+    },
   };
 }
 
