@@ -5,6 +5,7 @@ const db = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 const { asyncHandler } = require('../middleware/errorHandler');
 const commissionService = require('../services/commissionService');
+const cancellationService = require('../services/cancellationService'); // ✅ V14.8 Phase 2
 const pricingService    = require('../services/pricingService');   // ✅ V13 : calculs polymorphes
 const statsService      = require('../services/statsService');
 const emailService = require('../services/emailService');
@@ -16,6 +17,39 @@ const router = express.Router();
 
 // ── Générer code de réservation unique
 const generateCode = () => 'ZKG-' + Math.random().toString(36).substring(2, 8).toUpperCase();
+
+// ✅ V14.8 Phase 2 — Régler le volet financier d'une annulation :
+//   calcule le remboursement (politique + frais d'annulation), crédite la compensation
+//   au partenaire, et enregistre refund_amount / cancellation_fee sur la réservation.
+//   Ne fait rien si la réservation n'a pas été payée (aucun argent collecté).
+//   Renvoie le détail (calc) ou null. Non bloquant (try/catch internes).
+async function settleCancellation(bookingId) {
+  try {
+    const { data: b } = await db.from('bookings')
+      .select('id, subtotal, service_fee, partner_gets, start_date, payment_status, listings(cancel_policy, partner_id)')
+      .eq('id', bookingId).single();
+    if (!b || b.payment_status !== 'paid') return null;
+
+    const listing = b.listings || {};
+    const calc = await cancellationService.compute(b, listing);
+
+    // Compensation partenaire (frais d'annulation) → solde disponible
+    if (calc.partnerComp > 0 && listing.partner_id) {
+      try { await commissionService.creditPartner(listing.partner_id, calc.partnerComp); }
+      catch (e) { console.log('[settleCancellation comp]', e.message); }
+    }
+    // Enregistrer le détail sur la réservation
+    try {
+      await db.from('bookings').update({
+        refund_amount: calc.clientRefund,
+        cancellation_fee: calc.partnerComp,
+        cancelled_at: new Date(),
+      }).eq('id', bookingId);
+    } catch (e) { console.log('[settleCancellation record]', e.message); }
+
+    return calc;
+  } catch (e) { console.log('[settleCancellation]', e.message); return null; }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HELPERS V13
@@ -451,6 +485,9 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
 
   await db.from('bookings').update({ status: 'cancelled' }).eq('id', req.params.id);
 
+  // ✅ V14.8 Phase 2 : remboursement client + compensation partenaire
+  await settleCancellation(req.params.id);
+
   // ── V13 : pour covoit, restituer les places
   if (booking.seats_booked && booking.listing_id) {
     try {
@@ -502,6 +539,9 @@ router.patch('/:id/cancel', authenticate, asyncHandler(async (req, res) => {
 
   await db.from('bookings').update({ status: 'cancelled' }).eq('id', req.params.id);
 
+  // ✅ V14.8 Phase 2 : remboursement client + compensation partenaire
+  const calc = await settleCancellation(req.params.id);
+
   // ── V13 : pour covoit, restituer les places
   if (booking.seats_booked && booking.listing_id) {
     try {
@@ -519,17 +559,22 @@ router.patch('/:id/cancel', authenticate, asyncHandler(async (req, res) => {
     // ✅ V14.5.3 i18n : notif dans la langue du client
     // ✅ V14.5.4 : helper notifyUser (DB + push Expo) + data deep linking
     const L = await i18n.getUserLang(booking.user_id);
+    const baseBody = reason
+      ? await i18n.t('notif_booking_cancelled_reason', L, 'Raison: {reason}', { reason })
+      : await i18n.t('notif_booking_cancelled_default', L, 'Votre réservation a été annulée.');
+    // ✅ V14.8 Phase 2 : ajouter le montant remboursé si applicable
+    const refundLine = (calc && calc.clientRefund > 0)
+      ? ' ' + await i18n.t('notif_booking_refund', L, 'Remboursement : {amount} FCFA', { amount: calc.clientRefund })
+      : '';
     await notifyUser(booking.user_id, {
       title: await i18n.t('notif_booking_cancelled_title', L, 'Réservation annulée'),
-      body:  reason
-        ? await i18n.t('notif_booking_cancelled_reason', L, 'Raison: {reason}', { reason })
-        : await i18n.t('notif_booking_cancelled_default', L, 'Votre réservation a été annulée.'),
+      body:  baseBody + refundLine,
       type:  'info',
       data:  { booking_id: booking.id },
     });
   } catch(e) {}
 
-  res.json({ message: 'Réservation annulée' });
+  res.json({ message: 'Réservation annulée', refund: calc ? calc.clientRefund : null, cancellation_fee: calc ? calc.partnerComp : null });
 }));
 
 module.exports = router;
