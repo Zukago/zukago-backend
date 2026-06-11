@@ -530,6 +530,25 @@ router.patch('/:id/confirm-partner', authenticate, asyncHandler(async (req, res)
   res.json({ message: 'Réservation confirmée' });
 }));
 
+// ✅ V14.8 Phase 2c — Aperçu du remboursement AVANT d'annuler (ne modifie rien)
+router.get('/:id/cancellation-preview', authenticate, asyncHandler(async (req, res) => {
+  const { data: b } = await db.from('bookings')
+    .select('id, subtotal, service_fee, partner_gets, start_date, status, payment_status, listings(cancel_policy, partner_id)')
+    .eq('id', req.params.id).single();
+  if (!b) return res.status(404).json({ error: 'Réservation introuvable' });
+
+  const calc = await cancellationService.compute(b, b.listings || {});
+  res.json({
+    paid:         b.payment_status === 'paid',
+    clientRefund: calc.clientRefund,
+    partnerComp:  calc.partnerComp,
+    refundPct:    calc.refundPct,
+    cancelFeePct: calc.cancelFeePct,
+    policyCode:   calc.policyCode,
+    daysBefore:   calc.daysBefore,
+  });
+}));
+
 // ─── PATCH /api/bookings/:id/cancel — Annuler réservation
 router.patch('/:id/cancel', authenticate, asyncHandler(async (req, res) => {
   const { reason } = req.body;
