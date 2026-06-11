@@ -318,7 +318,7 @@ router.post('/withdraw', authenticate, requirePartner, asyncHandler(async (req, 
   if (Number(partner.solde) < amount) return res.status(400).json({ error: await i18n.t('partners_error_insufficient_balance', L, 'Solde insuffisant ({balance} FCFA)', { balance: partner.solde }) });
 
   const { data: withdrawal } = await db.from('withdrawals').insert({
-    partner_id: partner.id, amount, method, account,
+    partner_id: partner.id, amount, method, account, status: 'pending',
   }).select().single();
 
   res.status(201).json({ withdrawal, message: await i18n.t('partners_withdraw_submitted', L, 'Demande de retrait soumise. Traitement sous 48h.') });
