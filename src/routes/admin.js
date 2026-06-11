@@ -506,7 +506,7 @@ router.get('/withdrawals', asyncHandler(async (req, res) => {
 // PATCH /api/admin/withdrawals/:id/approve — Approuver retrait
 router.patch('/withdrawals/:id/approve', asyncHandler(async (req, res) => {
   const { data: withdrawal } = await db.from('withdrawals')
-    .select('*, partners(id, users(name, email))').eq('id', req.params.id).single();
+    .select('*').eq('id', req.params.id).single();
   if (!withdrawal) return res.status(404).json({ error: 'Retrait introuvable' });
 
   // Déduire du solde partenaire
@@ -518,11 +518,19 @@ router.patch('/withdrawals/:id/approve', asyncHandler(async (req, res) => {
     processed_at: new Date(),
   }).eq('id', req.params.id);
 
+  // ✅ V14.8 : infos partenaire/utilisateur en requêtes séparées (sans dépendre des FK)
+  let partnerUserId = null, user = null;
+  try {
+    const { data: p } = await db.from('partners').select('user_id').eq('id', withdrawal.partner_id).single();
+    partnerUserId = p?.user_id || null;
+    if (partnerUserId) {
+      const { data: u } = await db.from('users').select('name, email').eq('id', partnerUserId).single();
+      user = u || null;
+    }
+  } catch (e) { console.log('[approve partner lookup]', e.message); }
+
   // Notification in-app
   try {
-    // ✅ V14.5.3 i18n : notif dans la langue du partenaire
-    // ✅ V14.5.4 : helper notifyUser (DB + push Expo)
-    const partnerUserId = withdrawal.partners?.user_id || null;
     const L = await i18n.getUserLang(partnerUserId);
     await notifyUser(partnerUserId, {
       title: await i18n.t('notif_withdrawal_approved_title', L, 'Virement effectué'),
@@ -533,7 +541,7 @@ router.patch('/withdrawals/:id/approve', asyncHandler(async (req, res) => {
     });
   } catch(e) { console.log('Notif withdrawal approve error:', e.message); }
 
-  try { await emailService.sendWithdrawalApproved(withdrawal.partners.users, withdrawal); } catch(e) {}
+  try { if (user) await emailService.sendWithdrawalApproved(user, withdrawal); } catch(e) {}
   res.json({ message: 'Retrait approuvé et virement effectué' });
 }));
 
@@ -541,7 +549,8 @@ router.patch('/withdrawals/:id/approve', asyncHandler(async (req, res) => {
 router.patch('/withdrawals/:id/reject', asyncHandler(async (req, res) => {
   const { message } = req.body;
   const { data: withdrawal } = await db.from('withdrawals')
-    .select('*, partners(users(name, email))').eq('id', req.params.id).single();
+    .select('*').eq('id', req.params.id).single();
+  if (!withdrawal) return res.status(404).json({ error: 'Retrait introuvable' });
 
   await db.from('withdrawals').update({
     status: 'rejected',
@@ -549,7 +558,15 @@ router.patch('/withdrawals/:id/reject', asyncHandler(async (req, res) => {
     processed_by: req.user.id,
   }).eq('id', req.params.id);
 
-  await emailService.sendWithdrawalRejected(withdrawal.partners.users, message);
+  // ✅ V14.8 : email partenaire en requêtes séparées (sans dépendre des FK)
+  try {
+    const { data: p } = await db.from('partners').select('user_id').eq('id', withdrawal.partner_id).single();
+    if (p?.user_id) {
+      const { data: u } = await db.from('users').select('name, email').eq('id', p.user_id).single();
+      if (u) await emailService.sendWithdrawalRejected(u, message);
+    }
+  } catch (e) { console.log('[reject email]', e.message); }
+
   res.json({ message: 'Retrait refusé' });
 }));
 
