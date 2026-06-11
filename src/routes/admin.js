@@ -478,11 +478,29 @@ router.patch('/listings/:id/discount', asyncHandler(async (req, res) => {
 // GET /api/admin/withdrawals — Retraits en attente
 router.get('/withdrawals', asyncHandler(async (req, res) => {
   const status = req.query.status || 'pending';
-  const { data } = await db.from('withdrawals')
-    .select('*, partners(solde, users(name, email))')
+  // ✅ V14.8 : requêtes séparées — ne dépend PAS des clés étrangères withdrawals→partners→users
+  //    (une jointure imbriquée échoue si la FK n'existe pas → liste vide à tort)
+  const { data: rows, error } = await db.from('withdrawals')
+    .select('*')
     .eq('status', status)
     .order('created_at', { ascending: false });
-  res.json({ withdrawals: data || [] });
+  if (error) console.log('[admin GET /withdrawals] error:', error.message);
+  const list = rows || [];
+
+  const partnerIds = [...new Set(list.map(w => w.partner_id).filter(Boolean))];
+  const pById = {};
+  if (partnerIds.length) {
+    const { data: partners } = await db.from('partners').select('id, solde, user_id').in('id', partnerIds);
+    const userIds = [...new Set((partners || []).map(p => p.user_id).filter(Boolean))];
+    const uById = {};
+    if (userIds.length) {
+      const { data: users } = await db.from('users').select('id, name, email').in('id', userIds);
+      (users || []).forEach(u => { uById[u.id] = u; });
+    }
+    (partners || []).forEach(p => { pById[p.id] = { solde: p.solde, users: uById[p.user_id] || null }; });
+  }
+  const withdrawals = list.map(w => ({ ...w, partners: pById[w.partner_id] || null }));
+  res.json({ withdrawals });
 }));
 
 // PATCH /api/admin/withdrawals/:id/approve — Approuver retrait

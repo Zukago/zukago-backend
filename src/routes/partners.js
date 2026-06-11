@@ -224,10 +224,15 @@ router.get('/stats', authenticate, asyncHandler(async (req, res) => {
   });
 
   // ✅ V14.8 Séquestre : libérer les séjours terminés (+24h) puis lire les soldes à jour
-  await commissionService.releaseMatured(partner.id);
-  const pendingBalance = await commissionService.getPendingBalance(partner.id);
-  const { data: freshPartner } = await db.from('partners').select('solde').eq('id', partner.id).single();
-  const soldeDispo = Number(freshPartner?.solde || 0);
+  //    (non bloquant : si la colonne n'est pas encore migrée, on n'empêche pas le dashboard)
+  let pendingBalance = 0;
+  let soldeDispo = Number(partner.solde || 0);
+  try {
+    await commissionService.releaseMatured(partner.id);
+    pendingBalance = await commissionService.getPendingBalance(partner.id);
+    const { data: freshPartner } = await db.from('partners').select('solde').eq('id', partner.id).single();
+    soldeDispo = Number(freshPartner?.solde || 0);
+  } catch (e) { console.log('[stats sequestre]', e.message); }
 
   const now = new Date();
   const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
@@ -322,8 +327,8 @@ router.post('/withdraw', authenticate, requirePartner, asyncHandler(async (req, 
   if (!amount || amount <= 0) return res.status(400).json({ error: await i18n.t('partners_error_invalid_amount', L, 'Montant invalide') });
 
   const { data: partner } = await db.from('partners').select('id, solde').eq('user_id', req.user.id).single();
-  // ✅ V14.8 Séquestre : libérer les fonds mûrs, puis vérifier le solde DISPONIBLE à jour
-  await commissionService.releaseMatured(partner.id);
+  // ✅ V14.8 Séquestre : libérer les fonds mûrs (non bloquant), puis vérifier le solde DISPONIBLE
+  try { await commissionService.releaseMatured(partner.id); } catch (e) { console.log('[withdraw releaseMatured]', e.message); }
   const { data: freshPartner } = await db.from('partners').select('solde').eq('id', partner.id).single();
   const soldeDispo = Number(freshPartner?.solde || 0);
   if (soldeDispo < amount) return res.status(400).json({ error: await i18n.t('partners_error_insufficient_balance', L, 'Solde insuffisant ({balance} FCFA)', { balance: soldeDispo }) });
