@@ -383,7 +383,8 @@ router.post('/stripe/webhook', async (req, res) => {
         try {
           await commissionService.record(created.id, listing.partners?.id, pricing.commission || 0, pricing.commissionRate || 0);
           await commissionService.markPaid(created.id);
-          await commissionService.creditPartner(listing.partners?.id, pricing.partnerGets || 0);
+          // ✅ V14.8 Séquestre : pas de crédit direct au solde. La part partenaire reste
+          //    "en attente" et sera libérée 24h après la fin du séjour (releaseMatured).
           console.log('[Stripe webhook V14.4] Commission OK');
         } catch(e) { console.log('[Stripe webhook V14.4] Commission error:', e.message); }
 

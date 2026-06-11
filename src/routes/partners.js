@@ -220,8 +220,14 @@ router.get('/stats', authenticate, asyncHandler(async (req, res) => {
   // ✅ V10 : Plus d'auto-create. Si pas de profil partner → retourner stats vides.
   if (!partner) return res.json({
     totalListings: 0, activeListings: 0, totalBookings: 0, confirmedBookings: 0,
-    revenuMois: 0, totalRevenu: 0, solde: 0,
+    revenuMois: 0, totalRevenu: 0, solde: 0, pendingBalance: 0,
   });
+
+  // ✅ V14.8 Séquestre : libérer les séjours terminés (+24h) puis lire les soldes à jour
+  await commissionService.releaseMatured(partner.id);
+  const pendingBalance = await commissionService.getPendingBalance(partner.id);
+  const { data: freshPartner } = await db.from('partners').select('solde').eq('id', partner.id).single();
+  const soldeDispo = Number(freshPartner?.solde || 0);
 
   const now = new Date();
   const firstOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
@@ -256,7 +262,8 @@ router.get('/stats', authenticate, asyncHandler(async (req, res) => {
     confirmedBookings: confirmedBookings || 0,
     revenuMois,
     totalRevenu,
-    solde: partner.solde || 0,
+    solde: soldeDispo,
+    pendingBalance,
   });
 }));
 
@@ -315,7 +322,11 @@ router.post('/withdraw', authenticate, requirePartner, asyncHandler(async (req, 
   if (!amount || amount <= 0) return res.status(400).json({ error: await i18n.t('partners_error_invalid_amount', L, 'Montant invalide') });
 
   const { data: partner } = await db.from('partners').select('id, solde').eq('user_id', req.user.id).single();
-  if (Number(partner.solde) < amount) return res.status(400).json({ error: await i18n.t('partners_error_insufficient_balance', L, 'Solde insuffisant ({balance} FCFA)', { balance: partner.solde }) });
+  // ✅ V14.8 Séquestre : libérer les fonds mûrs, puis vérifier le solde DISPONIBLE à jour
+  await commissionService.releaseMatured(partner.id);
+  const { data: freshPartner } = await db.from('partners').select('solde').eq('id', partner.id).single();
+  const soldeDispo = Number(freshPartner?.solde || 0);
+  if (soldeDispo < amount) return res.status(400).json({ error: await i18n.t('partners_error_insufficient_balance', L, 'Solde insuffisant ({balance} FCFA)', { balance: soldeDispo }) });
 
   const { data: withdrawal } = await db.from('withdrawals').insert({
     partner_id: partner.id, amount, method, account, status: 'pending',

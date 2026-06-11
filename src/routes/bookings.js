@@ -433,8 +433,9 @@ router.patch('/:id/confirm', authenticate, asyncHandler(async (req, res) => {
   // Marquer commission
   await commissionService.markPaid(req.params.id);
 
-  // Créditer le partenaire
-  await commissionService.creditPartner(booking.listings.partner_id, booking.partner_gets);
+  // ✅ V14.8 Séquestre : les fonds ne sont PLUS crédités au solde au paiement.
+  //    La part partenaire reste "en attente" (dérivée de la réservation) et sera
+  //    libérée automatiquement 24h après la fin du séjour (commissionService.releaseMatured).
 
   res.json({ booking: updated });
 }));

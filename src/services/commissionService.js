@@ -113,6 +113,63 @@ class CommissionService {
 
     return { total, paid, pending, count: data?.length || 0, period };
   }
+
+  // ── V14.8 Séquestre : libérer les fonds des séjours terminés depuis +24h
+  //    Appelé "à la volée" (consultation du solde / demande de retrait). Déplace
+  //    partner_gets de "en attente" vers "solde disponible" pour chaque réservation
+  //    confirmée + payée dont la fin de séjour + 24h est passée et non encore libérée.
+  async releaseMatured(partnerId) {
+    if (!partnerId) return 0;
+    const SAFETY_WINDOW_MS = 24 * 60 * 60 * 1000; // fenêtre de sécurité 24h après checkout
+
+    const { data: listings } = await db.from('listings').select('id').eq('partner_id', partnerId);
+    const listingIds = (listings || []).map(l => l.id);
+    if (!listingIds.length) return 0;
+
+    const { data: candidates } = await db.from('bookings')
+      .select('id, partner_gets, end_date, start_date, created_at')
+      .in('listing_id', listingIds)
+      .eq('status', 'confirmed')
+      .eq('payment_status', 'paid')
+      .is('funds_released_at', null);
+    if (!candidates || !candidates.length) return 0;
+
+    const now = Date.now();
+    const matured = candidates.filter(b => {
+      const ref = b.end_date || b.start_date || b.created_at;
+      if (!ref) return false;
+      return new Date(ref).getTime() + SAFETY_WINDOW_MS <= now;
+    });
+    if (!matured.length) return 0;
+
+    const ids = matured.map(b => b.id);
+    const totalRelease = matured.reduce((s, b) => s + (Number(b.partner_gets) || 0), 0);
+    await db.from('bookings').update({ funds_released_at: new Date() }).in('id', ids);
+
+    if (totalRelease > 0) {
+      const { data: partner } = await db.from('partners').select('solde').eq('id', partnerId).single();
+      const newSolde = Number(partner?.solde || 0) + totalRelease;
+      await db.from('partners').update({ solde: newSolde }).eq('id', partnerId);
+    }
+    return totalRelease;
+  }
+
+  // ── V14.8 Séquestre : montant "en attente" (dérivé) = part partenaire des séjours
+  //    payés mais pas encore libérés (en cours ou dans la fenêtre de sécurité).
+  async getPendingBalance(partnerId) {
+    if (!partnerId) return 0;
+    const { data: listings } = await db.from('listings').select('id').eq('partner_id', partnerId);
+    const listingIds = (listings || []).map(l => l.id);
+    if (!listingIds.length) return 0;
+
+    const { data: rows } = await db.from('bookings')
+      .select('partner_gets')
+      .in('listing_id', listingIds)
+      .eq('status', 'confirmed')
+      .eq('payment_status', 'paid')
+      .is('funds_released_at', null);
+    return (rows || []).reduce((s, b) => s + (Number(b.partner_gets) || 0), 0);
+  }
 }
 
 module.exports = new CommissionService();
