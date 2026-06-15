@@ -500,6 +500,26 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
     } catch (e) { console.log('Seats restore error:', e.message); }
   }
 
+  // ✅ V14.8 : notifier le partenaire que le client a annulé (requêtes séparées, sans FK)
+  try {
+    if (booking.listing_id) {
+      const { data: l } = await db.from('listings').select('partner_id, title').eq('id', booking.listing_id).single();
+      if (l?.partner_id) {
+        const { data: p } = await db.from('partners').select('user_id').eq('id', l.partner_id).single();
+        const partnerUserId = p?.user_id || null;
+        if (partnerUserId) {
+          const L = await i18n.getUserLang(partnerUserId);
+          await notifyUser(partnerUserId, {
+            title: await i18n.t('notif_booking_client_cancelled_title', L, 'Réservation annulée par le client'),
+            body:  await i18n.t('notif_booking_client_cancelled_body',  L, 'Le client a annulé sa réservation pour « {title} ».', { title: l.title || '' }),
+            type:  'booking',
+            data:  { booking_id: booking.id },
+          });
+        }
+      }
+    }
+  } catch (e) { console.log('Notif client-cancel -> partner error:', e.message); }
+
   res.json({ message: 'Réservation annulée' });
 }));
 
