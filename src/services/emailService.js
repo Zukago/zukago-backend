@@ -31,10 +31,10 @@ const LOGO_URL = process.env.EMAIL_LOGO_URL
 // 2) RÉSEAUX SOCIAUX (les pages existent — cible diaspora) : remplace par tes vraies URLs
 //    url  = la page (au clic) · icon = l'image de l'icône hébergée (Cloudinary). Si icon vide → lien texte.
 const SOCIAL = {
-  facebook:  { url: process.env.SOCIAL_FACEBOOK  || 'https://www.facebook.com/share/1B6wAfjLSw/', icon: process.env.SOCIAL_ICON_FACEBOOK  || '' },
-  instagram: { url: process.env.SOCIAL_INSTAGRAM || 'https://www.instagram.com/zukago.official',  icon: process.env.SOCIAL_ICON_INSTAGRAM || '' },
-  tiktok:    { url: process.env.SOCIAL_TIKTOK    || 'https://www.tiktok.com/@zukago2',            icon: process.env.SOCIAL_ICON_TIKTOK    || '' },
-  linkedin:  { url: process.env.SOCIAL_LINKEDIN  || 'https://www.linkedin.com/company/zukago/',   icon: process.env.SOCIAL_ICON_LINKEDIN  || '' },
+  facebook:  { url: process.env.SOCIAL_FACEBOOK  || 'https://www.facebook.com/share/1B6wAfjLSw/', icon: process.env.SOCIAL_ICON_FACEBOOK  || 'https://res.cloudinary.com/dm3fo2ji5/image/upload/v1781552791/zukago-facebook_iu4fvt.png' },
+  instagram: { url: process.env.SOCIAL_INSTAGRAM || 'https://www.instagram.com/zukago.official',  icon: process.env.SOCIAL_ICON_INSTAGRAM || 'https://res.cloudinary.com/dm3fo2ji5/image/upload/v1781552925/zukago-instagram_qs7jgh.png' },
+  tiktok:    { url: process.env.SOCIAL_TIKTOK    || 'https://www.tiktok.com/@zukago2',            icon: process.env.SOCIAL_ICON_TIKTOK    || 'https://res.cloudinary.com/dm3fo2ji5/image/upload/v1781553073/zukago-tiktok_zj9kin.png' },
+  linkedin:  { url: process.env.SOCIAL_LINKEDIN  || 'https://www.linkedin.com/company/zukago/',   icon: process.env.SOCIAL_ICON_LINKEDIN  || 'https://res.cloudinary.com/dm3fo2ji5/image/upload/v1781552992/zukago-linkedin_owjoat.png' },
 };
 
 // Police titre (Playfair si dispo chez le client mail, sinon serif système)
