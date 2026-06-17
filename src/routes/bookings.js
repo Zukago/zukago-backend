@@ -518,7 +518,7 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
   await db.from('bookings').update({ status: 'cancelled' }).eq('id', req.params.id);
 
   // ✅ V14.8 Phase 2 : remboursement client + compensation partenaire
-  await settleCancellation(req.params.id);
+  const calc = await settleCancellation(req.params.id);
 
   // ── V13 : pour covoit, restituer les places
   if (booking.seats_booked && booking.listing_id) {
@@ -551,6 +551,21 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
       }
     }
   } catch (e) { console.log('Notif client-cancel -> partner error:', e.message); }
+
+  // ✅ V14.9 : notifier le CLIENT de l'annulation + montant remboursé (aligné sur PATCH /cancel, clés i18n existantes)
+  try {
+    const L = await i18n.getUserLang(booking.user_id);
+    const baseBody = await i18n.t('notif_booking_cancelled_default', L, 'Votre réservation a été annulée.');
+    const refundLine = (calc && calc.clientRefund > 0)
+      ? ' ' + await i18n.t('notif_booking_refund', L, 'Remboursement : {amount} FCFA', { amount: calc.clientRefund })
+      : '';
+    await notifyUser(booking.user_id, {
+      title: await i18n.t('notif_booking_cancelled_title', L, 'Réservation annulée'),
+      body:  baseBody + refundLine,
+      type:  'info',
+      data:  { booking_id: booking.id },
+    });
+  } catch (e) { console.log('Notif client-cancel -> client error:', e.message); }
 
   res.json({ message: 'Réservation annulée' });
 }));
