@@ -1,4 +1,5 @@
 const express = require('express');
+const stripe  = require('stripe')(process.env.STRIPE_SECRET_KEY); // ✅ V14.9 : remboursement carte réel (annulation)
 const { body, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/database');
@@ -26,7 +27,7 @@ const generateCode = () => 'ZKG-' + Math.random().toString(36).substring(2, 8).t
 async function settleCancellation(bookingId) {
   try {
     const { data: b } = await db.from('bookings')
-      .select('id, subtotal, service_fee, partner_gets, start_date, payment_status, listings(cancel_policy, partner_id)')
+      .select('id, subtotal, service_fee, partner_gets, start_date, payment_status, payment_method, payment_ref, refund_ref, listings(cancel_policy, partner_id)')
       .eq('id', bookingId).single();
     if (!b || b.payment_status !== 'paid') return null;
 
@@ -46,6 +47,37 @@ async function settleCancellation(bookingId) {
         cancelled_at: new Date(),
       }).eq('id', bookingId);
     } catch (e) { console.log('[settleCancellation record]', e.message); }
+
+    // ✅ V14.9 — REMBOURSEMENT RÉEL sur la carte du client (Stripe)
+    //   • Uniquement paiement CARTE (payment_ref = PaymentIntent "pi_…").
+    //   • Conversion FCFA → EUR cents avec le MÊME taux que l'encaissement (payments.js : 0.00152).
+    //   • Idempotent : skip si refund_ref déjà présent + idempotencyKey déterministe Stripe.
+    //   • Non bloquant : en cas d'échec, le calcul reste enregistré (fallback = remboursement manuel dashboard).
+    //   • MoMo/CinetPay : pas encore automatisé → log "manuel requis" (TODO CinetPay refund/Transfer).
+    const FCFA_TO_EUR = 0.00152; // identique à payments.js (cohérence montant débité ↔ remboursé)
+    if (b.payment_method === 'card' && b.payment_ref && !b.refund_ref && calc.clientRefund > 0) {
+      const refundCents = Math.round(Number(calc.clientRefund) * FCFA_TO_EUR * 100);
+      if (refundCents > 0) {
+        try {
+          const refund = await stripe.refunds.create(
+            {
+              payment_intent: b.payment_ref,
+              amount: refundCents,
+              reason: 'requested_by_customer',
+              metadata: { booking_id: String(bookingId), refund_fcfa: String(calc.clientRefund) },
+            },
+            { idempotencyKey: `refund_${bookingId}` }
+          );
+          try { await db.from('bookings').update({ refund_ref: refund.id }).eq('id', bookingId); }
+          catch (e) { console.log('[settleCancellation refund_ref]', e.message); }
+          console.log(`[settleCancellation] ✅ Refund Stripe ${refund.id} — ${refundCents} cents EUR (${calc.clientRefund} FCFA) · booking ${bookingId}`);
+        } catch (e) {
+          console.log('[settleCancellation refund Stripe] ⚠️ échec — remboursement manuel requis:', e.message);
+        }
+      }
+    } else if (b.payment_method && b.payment_method !== 'card' && calc.clientRefund > 0) {
+      console.log(`[settleCancellation] ℹ️ Paiement ${b.payment_method} — remboursement MoMo manuel requis (${calc.clientRefund} FCFA) · booking ${bookingId}`);
+    }
 
     return calc;
   } catch (e) { console.log('[settleCancellation]', e.message); return null; }
