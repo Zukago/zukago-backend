@@ -85,8 +85,8 @@ async function pawapayRequest(path, body) {
 //   Retour : { depositId, status: 'ACCEPTED', created }
 //   Le client reçoit un push/USSD sur son téléphone pour saisir son PIN.
 //   Le statut final (COMPLETED) arrivera via le callback → on crée le booking.
-async function initiateDeposit({ amountFcfa, operator, phone, statementDescription, metadata }) {
-  const depositId = uuid();
+async function initiateDeposit({ depositId: providedId, amountFcfa, operator, phone, statementDescription, metadata }) {
+  const depositId = providedId || uuid();
   const body = {
     depositId,
     amount:        toPawapayAmount(amountFcfa),

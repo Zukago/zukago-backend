@@ -76,6 +76,7 @@ router.post('/deposit', authenticate, asyncHandler(async (req, res) => {
   }
   const pricePerNight = Math.round((Number(calc.subtotal) || 0) / Math.max(1, unit_count || nights));
   const code = 'ZKG-' + Math.random().toString(36).substring(2, 8).toUpperCase();
+  const depositId = require('crypto').randomUUID(); // ✅ généré AVANT le booking (évite la race avec le callback sandbox instantané)
 
   // 4. Créer le booking en 'pending' (sera confirmé par le callback)
   const insertData = {
@@ -85,6 +86,7 @@ router.post('/deposit', authenticate, asyncHandler(async (req, res) => {
     status:          'pending',
     payment_status:  'pending',
     payment_method:  'momo',
+    payment_ref:     depositId,
     start_date:      start_date || null,
     end_date:        end_date || null,
     nights,
@@ -112,9 +114,10 @@ router.post('/deposit', authenticate, asyncHandler(async (req, res) => {
     return res.status(500).json({ error: await i18n.t('pawapay_error_create', L, 'Erreur création réservation') });
   }
 
-  // 5. Initier le deposit pawaPay
+  // 5. Initier le deposit pawaPay (depositId déjà stocké sur le booking)
   try {
     const result = await pawapay.initiateDeposit({
+      depositId,
       amountFcfa: calc.total,
       operator,
       phone,
@@ -125,14 +128,18 @@ router.post('/deposit', authenticate, asyncHandler(async (req, res) => {
       ],
     });
 
-    // Stocker le depositId sur le booking (payment_ref) pour le retrouver au callback
-    await db.from('bookings').update({ payment_ref: result.depositId }).eq('id', booking.id);
+    // pawaPay non configuré (token manquant) → annuler proprement (pas de spinner infini)
+    if (result && result.skipped) {
+      await db.from('bookings').update({ status: 'cancelled', payment_status: 'failed' }).eq('id', booking.id);
+      console.log('[pawapay deposit] ⚠️ deposit SKIPPED — PAWAPAY_API_TOKEN manquant sur Railway');
+      return res.status(503).json({ error: await i18n.t('pawapay_error_unavailable', L, 'Paiement Mobile Money momentanement indisponible') });
+    }
 
-    console.log(`[pawapay deposit] booking ${booking.id} pending · depositId ${result.depositId} · status ${result.status}`);
+    console.log(`[pawapay deposit] booking ${booking.id} pending · depositId ${depositId} · status ${result.status}`);
 
     return res.json({
       booking_id:  booking.id,
-      deposit_id:  result.depositId,
+      deposit_id:  depositId,
       status:      result.status || 'ACCEPTED', // ACCEPTED → le client doit valider sur son téléphone
       amount_fcfa: calc.total,
       breakdown:   calc.breakdown,
