@@ -519,7 +519,14 @@ router.patch('/withdrawals/:id/approve', asyncHandler(async (req, res) => {
 
   // ✅ V14.9 — Cas Mobile Money : payout RÉEL via pawaPay (asynchrone)
   //   processing → 'sent' (callback COMPLETED) ou re-crédit (callback FAILED)
-  const _op = String(withdrawal.method || '').toLowerCase();
+  let _op = String(withdrawal.method || '').toLowerCase();
+  // Si method n'est pas déjà un code opérateur, le résoudre via payment_methods (id → code)
+  if (_op !== 'mtn' && _op !== 'orange') {
+    try {
+      const { data: pm } = await db.from('payment_methods').select('code').eq('id', withdrawal.method).maybeSingle();
+      if (pm?.code) _op = String(pm.code).toLowerCase();
+    } catch (e) { console.log('[admin approve] resolve method code:', e.message); }
+  }
   if (_op === 'mtn' || _op === 'orange') {
     try {
       const payout = await pawapay.initiatePayout({
