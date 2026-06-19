@@ -227,7 +227,10 @@ router.post('/callback/deposit', asyncHandler(async (req, res) => {
   if (booking.payment_status === 'paid') { return res.json({ received: true }); }
 
   if (status === 'COMPLETED') {
-    await db.from('bookings').update({ status: 'confirmed', payment_status: 'paid' }).eq('id', booking.id);
+    const { error: upErr } = await db.from('bookings').update({ status: 'confirmed', payment_status: 'paid' }).eq('id', booking.id);
+    if (upErr) console.log('[pawapay callback/deposit] ⚠️ UPDATE échec:', upErr.message);
+    const { data: check } = await db.from('bookings').select('id, status, payment_status').eq('id', booking.id).single();
+    console.log('[pawapay callback/deposit] DB après update =', JSON.stringify(check));
     const updated = { ...booking, status: 'confirmed', payment_status: 'paid' };
     await finalizePaidBooking(updated);
     console.log('[pawapay callback/deposit] ✅ Booking confirmé:', booking.id);
