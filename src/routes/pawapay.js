@@ -153,7 +153,21 @@ router.post('/deposit', authenticate, asyncHandler(async (req, res) => {
   }
 }));
 
-// ─── Helper : finaliser un booking payé (mirror post-paiement Stripe) ─────
+// ─── GET /status/:bookingId — statut léger pour le polling de l'app ───────
+//   Évite la grosse route GET /bookings/:id (jointures fragiles).
+router.get('/status/:bookingId', authenticate, asyncHandler(async (req, res) => {
+  const { data: b } = await db.from('bookings')
+    .select('id, user_id, status, payment_status, code')
+    .eq('id', req.params.bookingId)
+    .single();
+  if (!b) return res.status(404).json({ error: 'introuvable' });
+  if (b.user_id !== req.user.id && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'non autorise' });
+  }
+  res.json({ id: b.id, status: b.status, payment_status: b.payment_status, code: b.code });
+}));
+
+
 async function finalizePaidBooking(booking) {
   const { data: listing } = await db.from('listings')
     .select('*, partners(id, user_id)')
