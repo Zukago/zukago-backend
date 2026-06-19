@@ -8,6 +8,7 @@ const statsService      = require('../services/statsService');
 const i18n = require('../services/i18nService');
 // ✅ V14.5.4 : Helper centralisé notification (DB insert + push Expo)
 const { notifyUser, notifyUsers } = require('../services/notifyUser');
+const pawapay = require('../services/pawapayService'); // ✅ V14.9 payout MoMo
 
 const router = express.Router();
 router.use(authenticate, requireAdmin);
@@ -508,10 +509,60 @@ router.patch('/withdrawals/:id/approve', asyncHandler(async (req, res) => {
   const { data: withdrawal } = await db.from('withdrawals')
     .select('*').eq('id', req.params.id).single();
   if (!withdrawal) return res.status(404).json({ error: 'Retrait introuvable' });
+  // Idempotence : ne pas re-traiter un retrait déjà envoyé / en cours
+  if (withdrawal.status === 'sent' || withdrawal.status === 'processing') {
+    return res.status(400).json({ error: 'Retrait déjà traité' });
+  }
 
   // Déduire du solde partenaire
   await commissionService.debitPartner(withdrawal.partner_id, withdrawal.amount);
 
+  // ✅ V14.9 — Cas Mobile Money : payout RÉEL via pawaPay (asynchrone)
+  //   processing → 'sent' (callback COMPLETED) ou re-crédit (callback FAILED)
+  const _op = String(withdrawal.method || '').toLowerCase();
+  if (_op === 'mtn' || _op === 'orange') {
+    try {
+      const payout = await pawapay.initiatePayout({
+        amountFcfa: withdrawal.amount,
+        operator:   _op,
+        phone:      withdrawal.account,
+        statementDescription: 'ZUKAGO',
+      });
+      // pawaPay non configuré (token manquant) → re-crédit, pas de faux "envoyé"
+      if (payout && payout.skipped) {
+        await commissionService.creditPartner(withdrawal.partner_id, withdrawal.amount);
+        return res.status(503).json({ error: 'Service de virement momentanement indisponible' });
+      }
+      await db.from('withdrawals').update({
+        status:       'processing',
+        payout_ref:   payout.payoutId,
+        processed_by: req.user.id,
+        processed_at: new Date(),
+      }).eq('id', req.params.id);
+
+      // Notif "virement en cours" (le "effectué" viendra du callback)
+      try {
+        const { data: p } = await db.from('partners').select('user_id').eq('id', withdrawal.partner_id).single();
+        if (p?.user_id) {
+          const L = await i18n.getUserLang(p.user_id);
+          await notifyUser(p.user_id, {
+            title: await i18n.t('notif_withdrawal_processing_title', L, 'Virement en cours'),
+            body:  await i18n.t('notif_withdrawal_processing_body',  L, 'Votre retrait de {amount} FCFA est en cours de traitement.', { amount: withdrawal.amount?.toLocaleString() || '0' }),
+            type:  'payment',
+          });
+        }
+      } catch (e) { console.log('[admin approve momo notif]', e.message); }
+
+      console.log(`[admin approve] payout initié · withdrawal ${req.params.id} · payoutId ${payout.payoutId}`);
+      return res.json({ message: 'Virement initié — confirmation en cours', status: 'processing' });
+    } catch (e) {
+      console.log('[admin approve] initiatePayout error:', e.message);
+      await commissionService.creditPartner(withdrawal.partner_id, withdrawal.amount);
+      return res.status(502).json({ error: 'Echec de l initiation du virement' });
+    }
+  }
+
+  // ── Fallback non-MoMo : comportement existant (marquer envoyé) ──
   await db.from('withdrawals').update({
     status: 'sent',
     processed_by: req.user.id,

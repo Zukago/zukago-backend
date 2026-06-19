@@ -257,12 +257,65 @@ router.post('/callback/deposit', asyncHandler(async (req, res) => {
   return res.json({ received: true });
 }));
 
-// ─── POST /callback/payout — (Phase 2) virement partenaire ────────────────
+// ─── POST /callback/payout — pawaPay confirme le virement partenaire ──────
 router.post('/callback/payout', asyncHandler(async (req, res) => {
+  if (!pawapay.verifyCallbackSignature(req.headers, req.body)) {
+    console.log('[pawapay callback/payout] signature invalide');
+    return res.status(401).json({ error: 'bad signature' });
+  }
   const cb = req.body || {};
-  console.log(`[pawapay callback/payout] payoutId ${cb.payoutId} status ${cb.status}`);
-  // TODO Phase 2 : retrouver le retrait via payoutId, marquer 'sent' (COMPLETED)
-  //                ou rembourser le solde + notifier l'échec (FAILED).
+  const payoutId = cb.payoutId;
+  const status   = cb.status;
+  console.log(`[pawapay callback/payout] payoutId ${payoutId} status ${status}`);
+  if (!payoutId) return res.json({ received: true });
+
+  const { data: w } = await db.from('withdrawals').select('*').eq('payout_ref', payoutId).single();
+  if (!w) { console.log('[pawapay callback/payout] retrait introuvable pour', payoutId); return res.json({ received: true }); }
+  if (w.status === 'sent' || w.status === 'failed') { return res.json({ received: true }); } // idempotence
+
+  // Infos partenaire / user (requêtes séparées, sans dépendre des FK)
+  let partnerUserId = null, user = null;
+  try {
+    const { data: p } = await db.from('partners').select('user_id').eq('id', w.partner_id).single();
+    partnerUserId = p?.user_id || null;
+    if (partnerUserId) {
+      const { data: u } = await db.from('users').select('name, email').eq('id', partnerUserId).single();
+      user = u || null;
+    }
+  } catch (e) { console.log('[pawapay callback/payout] lookup error:', e.message); }
+
+  if (status === 'COMPLETED') {
+    await db.from('withdrawals').update({ status: 'sent' }).eq('id', w.id);
+    if (partnerUserId) {
+      try {
+        const L = await i18n.getUserLang(partnerUserId);
+        await notifyUser(partnerUserId, {
+          title: await i18n.t('notif_withdrawal_approved_title', L, 'Virement effectué'),
+          body:  await i18n.t('notif_withdrawal_approved_body',  L, 'Votre retrait de {amount} FCFA a été traité. Vous devriez le recevoir sous 24-48h.', { amount: w.amount?.toLocaleString() || '0' }),
+          type:  'payment',
+        });
+      } catch (e) { console.log('[pawapay callback/payout] notif error:', e.message); }
+    }
+    try { if (user) emailService.sendWithdrawalApproved(user, w).catch(() => {}); } catch (e) {}
+    console.log('[pawapay callback/payout] ✅ Virement confirmé:', w.id);
+  } else if (status === 'FAILED' || status === 'REJECTED') {
+    await db.from('withdrawals').update({ status: 'failed' }).eq('id', w.id);
+    // Re-crédit du solde : l'argent n'est pas parti
+    try { await commissionService.creditPartner(w.partner_id, w.amount); } catch (e) { console.log('[pawapay callback/payout] re-crédit error:', e.message); }
+    if (partnerUserId) {
+      try {
+        const L = await i18n.getUserLang(partnerUserId);
+        await notifyUser(partnerUserId, {
+          title: await i18n.t('notif_withdrawal_failed_title', L, 'Virement échoué'),
+          body:  await i18n.t('notif_withdrawal_failed_body',  L, "Votre retrait de {amount} FCFA n'a pas pu être effectué. Le montant a été recrédité sur votre solde.", { amount: w.amount?.toLocaleString() || '0' }),
+          type:  'payment',
+        });
+      } catch (e) { console.log('[pawapay callback/payout] notif fail error:', e.message); }
+    }
+    console.log('[pawapay callback/payout] ❌ Virement échoué, solde recrédité:', w.id);
+  }
+  // Autres statuts (en cours) : on attend le statut final.
+
   return res.json({ received: true });
 }));
 
