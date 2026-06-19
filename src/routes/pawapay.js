@@ -319,11 +319,41 @@ router.post('/callback/payout', asyncHandler(async (req, res) => {
   return res.json({ received: true });
 }));
 
-// ─── POST /callback/refund — (Phase 3) remboursement MoMo ─────────────────
+// ─── POST /callback/refund — pawaPay confirme le remboursement client ─────
 router.post('/callback/refund', asyncHandler(async (req, res) => {
+  if (!pawapay.verifyCallbackSignature(req.headers, req.body)) {
+    console.log('[pawapay callback/refund] signature invalide');
+    return res.status(401).json({ error: 'bad signature' });
+  }
   const cb = req.body || {};
-  console.log(`[pawapay callback/refund] refundId ${cb.refundId} status ${cb.status}`);
-  // TODO Phase 3 : marquer le booking remboursé (refund_ref) sur COMPLETED.
+  const refundId = cb.refundId;
+  const status   = cb.status;
+  console.log(`[pawapay callback/refund] refundId ${refundId} status ${status}`);
+  if (!refundId) return res.json({ received: true });
+
+  const { data: booking } = await db.from('bookings')
+    .select('id, user_id, refund_status, refund_amount')
+    .eq('refund_ref', refundId).single();
+  if (!booking) { console.log('[pawapay callback/refund] booking introuvable pour', refundId); return res.json({ received: true }); }
+  if (booking.refund_status === 'refunded') return res.json({ received: true }); // idempotence
+
+  if (status === 'COMPLETED') {
+    await db.from('bookings').update({ refund_status: 'refunded' }).eq('id', booking.id);
+    try {
+      const L = await i18n.getUserLang(booking.user_id);
+      await notifyUser(booking.user_id, {
+        title: await i18n.t('notif_refund_done_title', L, 'Remboursement effectué'),
+        body:  await i18n.t('notif_refund_done_body',  L, 'Votre remboursement de {amount} FCFA a été envoyé sur votre Mobile Money.', { amount: booking.refund_amount?.toLocaleString() || '0' }),
+        type:  'payment',
+      });
+    } catch (e) { console.log('[pawapay callback/refund] notif error:', e.message); }
+    console.log('[pawapay callback/refund] ✅ Remboursement confirmé:', booking.id);
+  } else if (status === 'FAILED' || status === 'REJECTED') {
+    await db.from('bookings').update({ refund_status: 'failed' }).eq('id', booking.id);
+    console.log('[pawapay callback/refund] ❌ Remboursement échoué (à reprendre manuellement):', booking.id);
+  }
+  // Autres statuts (en cours) : on attend le statut final.
+
   return res.json({ received: true });
 }));
 

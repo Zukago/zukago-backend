@@ -1,5 +1,4 @@
 const express = require('express');
-const stripe  = require('stripe')(process.env.STRIPE_SECRET_KEY); // ✅ V14.9 : remboursement carte réel (annulation)
 const { body, validationResult } = require('express-validator');
 const { v4: uuidv4 } = require('uuid');
 const db = require('../config/database');
@@ -13,6 +12,8 @@ const emailService = require('../services/emailService');
 const i18n = require('../services/i18nService');
 // ✅ V14.5.4 : Helper centralisé notification (DB insert + push Expo)
 const { notifyUser } = require('../services/notifyUser');
+const stripe  = require('stripe')(process.env.STRIPE_SECRET_KEY); // ✅ V14.9 refund carte
+const pawapay = require('../services/pawapayService');            // ✅ V14.9 refund MoMo
 
 const router = express.Router();
 
@@ -48,35 +49,35 @@ async function settleCancellation(bookingId) {
       }).eq('id', bookingId);
     } catch (e) { console.log('[settleCancellation record]', e.message); }
 
-    // ✅ V14.9 — REMBOURSEMENT RÉEL sur la carte du client (Stripe)
-    //   • Uniquement paiement CARTE (payment_ref = PaymentIntent "pi_…").
-    //   • Conversion FCFA → EUR cents avec le MÊME taux que l'encaissement (payments.js : 0.00152).
-    //   • Idempotent : skip si refund_ref déjà présent + idempotencyKey déterministe Stripe.
-    //   • Non bloquant : en cas d'échec, le calcul reste enregistré (fallback = remboursement manuel dashboard).
-    //   • MoMo/CinetPay : pas encore automatisé → log "manuel requis" (TODO CinetPay refund/Transfer).
-    const FCFA_TO_EUR = 0.00152; // identique à payments.js (cohérence montant débité ↔ remboursé)
-    if (b.payment_method === 'card' && b.payment_ref && !b.refund_ref && calc.clientRefund > 0) {
-      const refundCents = Math.round(Number(calc.clientRefund) * FCFA_TO_EUR * 100);
-      if (refundCents > 0) {
-        try {
-          const refund = await stripe.refunds.create(
-            {
-              payment_intent: b.payment_ref,
-              amount: refundCents,
-              reason: 'requested_by_customer',
-              metadata: { booking_id: String(bookingId), refund_fcfa: String(calc.clientRefund) },
-            },
-            { idempotencyKey: `refund_${bookingId}` }
-          );
-          try { await db.from('bookings').update({ refund_ref: refund.id }).eq('id', bookingId); }
-          catch (e) { console.log('[settleCancellation refund_ref]', e.message); }
-          console.log(`[settleCancellation] ✅ Refund Stripe ${refund.id} — ${refundCents} cents EUR (${calc.clientRefund} FCFA) · booking ${bookingId}`);
-        } catch (e) {
-          console.log('[settleCancellation refund Stripe] ⚠️ échec — remboursement manuel requis:', e.message);
+    // ✅ V14.9 Phase 3 — Remboursement RÉEL au client (carte Stripe / MoMo pawaPay)
+    //   Idempotent : on ne rembourse pas si refund_ref est déjà posé.
+    if (calc.clientRefund > 0 && !b.refund_ref && b.payment_ref) {
+      const pm = b.payment_method;
+      try {
+        if (pm === 'card') {
+          const eurCents = Math.round(Number(calc.clientRefund) * 0.00152 * 100); // 1 FCFA ≈ 0.00152 EUR
+          const refund = await stripe.refunds.create({
+            payment_intent: b.payment_ref,
+            amount:         eurCents,
+            reason:         'requested_by_customer',
+            metadata:       { booking_id: String(b.id), fcfa: String(calc.clientRefund) },
+          }, { idempotencyKey: 'refund_' + b.id });
+          await db.from('bookings').update({ refund_ref: refund.id, refund_status: refund.status || 'succeeded' }).eq('id', b.id);
+          console.log('[settleCancellation] ✅ refund Stripe', refund.id, '·', eurCents, 'cents');
+        } else if (pm === 'momo') {
+          const refund = await pawapay.initiateRefund({ depositId: b.payment_ref, amountFcfa: calc.clientRefund });
+          if (refund && refund.skipped) {
+            console.log('[settleCancellation] ⚠️ refund MoMo ignoré (PAWAPAY_API_TOKEN manquant)');
+          } else {
+            await db.from('bookings').update({ refund_ref: refund.refundId, refund_status: 'processing' }).eq('id', b.id);
+            console.log('[settleCancellation] refund MoMo initié ·', refund.refundId);
+          }
+        } else {
+          console.log('[settleCancellation] refund non exécuté (méthode non gérée):', pm);
         }
+      } catch (e) {
+        console.log('[settleCancellation] refund error:', e.message);
       }
-    } else if (b.payment_method && b.payment_method !== 'card' && calc.clientRefund > 0) {
-      console.log(`[settleCancellation] ℹ️ Paiement ${b.payment_method} — remboursement MoMo manuel requis (${calc.clientRefund} FCFA) · booking ${bookingId}`);
     }
 
     return calc;
@@ -518,7 +519,7 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
   await db.from('bookings').update({ status: 'cancelled' }).eq('id', req.params.id);
 
   // ✅ V14.8 Phase 2 : remboursement client + compensation partenaire
-  const calc = await settleCancellation(req.params.id);
+  await settleCancellation(req.params.id);
 
   // ── V13 : pour covoit, restituer les places
   if (booking.seats_booked && booking.listing_id) {
@@ -551,21 +552,6 @@ router.delete('/:id', authenticate, asyncHandler(async (req, res) => {
       }
     }
   } catch (e) { console.log('Notif client-cancel -> partner error:', e.message); }
-
-  // ✅ V14.9 : notifier le CLIENT de l'annulation + montant remboursé (aligné sur PATCH /cancel, clés i18n existantes)
-  try {
-    const L = await i18n.getUserLang(booking.user_id);
-    const baseBody = await i18n.t('notif_booking_cancelled_default', L, 'Votre réservation a été annulée.');
-    const refundLine = (calc && calc.clientRefund > 0)
-      ? ' ' + await i18n.t('notif_booking_refund', L, 'Remboursement : {amount} FCFA', { amount: calc.clientRefund })
-      : '';
-    await notifyUser(booking.user_id, {
-      title: await i18n.t('notif_booking_cancelled_title', L, 'Réservation annulée'),
-      body:  baseBody + refundLine,
-      type:  'info',
-      data:  { booking_id: booking.id },
-    });
-  } catch (e) { console.log('Notif client-cancel -> client error:', e.message); }
 
   res.json({ message: 'Réservation annulée' });
 }));
