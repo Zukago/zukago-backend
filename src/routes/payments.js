@@ -73,6 +73,27 @@ async function checkOverlapPrepare(listing, params) {
   if (!start_date || !end_date) return { conflict: false };
 
   const isDriver = listing.type === 'driver';
+
+  // ✅ FIX V14.9 — Blocages manuels du propriétaire : bloquent TOUTE l'annonce.
+  //    Manquait dans le flux CARTE/Stripe (checkOverlapPrepare) → régression.
+  //    PURE ADD, miroir exact de checkOverlap (bookings.js).
+  {
+    let blockQuery = db.from('listing_blocked_dates')
+      .select('id')
+      .eq('listing_id', listing.id);
+    if (isDriver) {
+      // Driver jour : inclusif des deux côtés
+      blockQuery = blockQuery.lte('start_date', end_date).gte('end_date', start_date);
+    } else {
+      // Apt/hotel/car : nuit de check-out libre (strict sur start), inclusif sur end
+      blockQuery = blockQuery.lt('start_date', end_date).gte('end_date', start_date);
+    }
+    const { data: blocks } = await blockQuery;
+    if (blocks?.length) {
+      return { conflict: true, reason: 'Ces dates ne sont pas disponibles' };
+    }
+  }
+
   let query = db.from('bookings')
     .select('id, room_type_id')
     .eq('listing_id', listing.id)
