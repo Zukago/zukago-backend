@@ -251,9 +251,9 @@ router.get('/stats', authenticate, asyncHandler(async (req, res) => {
       .in('listing_id', (await db.from('listings').select('id').eq('partner_id', partner.id)).data?.map(l=>l.id)||[]),
     db.from('bookings').select('*', { count: 'exact', head: true }).eq('status', 'confirmed')
       .in('listing_id', (await db.from('listings').select('id').eq('partner_id', partner.id)).data?.map(l=>l.id)||[]),
-    db.from('bookings').select('partner_gets').gte('created_at', firstOfMonth)
+    db.from('bookings').select('partner_gets').eq('status', 'confirmed').gte('created_at', firstOfMonth)
       .in('listing_id', (await db.from('listings').select('id').eq('partner_id', partner.id)).data?.map(l=>l.id)||[]),
-    db.from('bookings').select('partner_gets')
+    db.from('bookings').select('partner_gets').eq('status', 'confirmed')
       .in('listing_id', (await db.from('listings').select('id').eq('partner_id', partner.id)).data?.map(l=>l.id)||[]),
   ]);
 
