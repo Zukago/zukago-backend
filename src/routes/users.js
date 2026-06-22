@@ -62,6 +62,39 @@ router.post('/change-password', authenticate, asyncHandler(async (req, res) => {
   res.json({ message: await i18n.t('users_pwd_updated', L, 'Mot de passe mis à jour avec succès') });
 }));
 
+// ─── DELETE /api/users/me — Supprimer (anonymiser) son compte · RGPD + Apple ──
+// Exigence Apple App Store : toute app avec création de compte doit permettre
+// la suppression in-app. RGPD/DSGVO : droit à l'effacement.
+// → On ANONYMISE (on ne supprime pas la ligne) pour préserver l'intégrité des
+//   réservations/paiements liés, requise légalement (conservation comptable).
+//   Toutes les données personnelles sont effacées + flag is_deleted.
+router.delete('/me', authenticate, asyncHandler(async (req, res) => {
+  const L   = await i18n.getUserLang(req.user.id);
+  const uid = req.user.id;
+
+  const { error } = await db.from('users')
+    .update({
+      name:          'Compte supprimé',
+      email:         `deleted_${uid}@zukago.deleted`,
+      phone:         null,
+      whatsapp:      null,
+      avatar:        null,
+      password_hash: null,
+      is_deleted:    true,
+      deleted_at:    new Date(),
+      updated_at:    new Date(),
+    })
+    .eq('id', uid);
+
+  if (error) {
+    console.log('[delete-account] Error:', error.message);
+    return res.status(500).json({ error: await i18n.t('users_delete_failed', L, 'Impossible de supprimer le compte') });
+  }
+
+  console.log('[delete-account] User', uid, '— compte anonymisé/supprimé');
+  res.json({ message: await i18n.t('users_delete_ok', L, 'Compte supprimé') });
+}));
+
 // ─── V14.3 : PATCH /api/users/preferred-lang — Sauvegarder langue préférée ──
 // Appelé par LanguageContext.setLang() côté frontend
 // Permet aux notifications push d'être traduites côté backend (style Booking/Airbnb)
