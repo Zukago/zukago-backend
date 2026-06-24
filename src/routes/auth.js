@@ -391,6 +391,85 @@ router.post('/google', asyncHandler(async (req, res) => {
   res.json({ user: userSafe, ...tokens });
 }));
 
+// POST /api/auth/apple
+// ✅ Sign in with Apple — calqué sur /google. Vérifie la signature du token Apple
+//    (JWT RS256) contre les clés publiques d'Apple, puis find-or-create par email.
+//    Aucune dépendance nouvelle : crypto (built-in) + jsonwebtoken (déjà importé).
+router.post('/apple', asyncHandler(async (req, res) => {
+  const { appleToken, name } = req.body;
+  if (!appleToken) return res.status(400).json({ error: 'Token Apple manquant' });
+
+  let payload;
+  try {
+    // 1) Décoder le header pour récupérer le kid (identifiant de la clé)
+    const header = JSON.parse(Buffer.from(appleToken.split('.')[0], 'base64').toString('utf8'));
+
+    // 2) Récupérer les clés publiques d'Apple (JWKS)
+    const jwksRes = await fetch('https://appleid.apple.com/auth/keys');
+    const { keys } = await jwksRes.json();
+    const jwk = keys.find(k => k.kid === header.kid);
+    if (!jwk) return res.status(401).json({ error: 'Cle Apple introuvable' });
+
+    // 3) JWK → clé publique (Node 16+)
+    const publicKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+
+    // 4) Vérifier signature + issuer + audience (bundle id) + expiration
+    payload = jwt.verify(appleToken, publicKey, {
+      algorithms: ['RS256'],
+      issuer: 'https://appleid.apple.com',
+      audience: process.env.APPLE_BUNDLE_ID || 'com.zukago.app',
+    });
+  } catch (e) {
+    console.log('[Auth Apple] Token invalide:', e.message);
+    return res.status(401).json({ error: 'Token Apple invalide' });
+  }
+
+  // L'email est présent dans le payload à CHAQUE connexion (même relais privé).
+  const verifiedEmail = payload.email;
+  if (!verifiedEmail) return res.status(400).json({ error: 'Email Apple manquant' });
+  // Le nom n'est fourni qu'à la 1ère connexion (envoyé par l'app dans req.body).
+  const verifiedName = name || verifiedEmail.split('@')[0];
+
+  let { data: user } = await db.from('users').select('*').eq('email', verifiedEmail).single();
+
+  if (!user) {
+    const { data: newUser, error } = await db.from('users').insert({
+      name:              verifiedName,
+      email:             verifiedEmail,
+      provider:          'apple',
+      role:              'client',
+      verified:          false,
+      email_verified:    true,
+      demande_verified:  false,
+    }).select('id, name, email, role, avatar, verified, email_verified, demande_verified').single();
+    if (error) throw new Error(error.message);
+    user = newUser;
+    // Apple a déjà vérifié l'email → email de bienvenue (pas de vérification)
+    try {
+      await emailService.sendWelcome(user);
+      console.log('[Auth Apple] Email bienvenue envoyé à', user.email);
+    } catch (e) {
+      console.log('[Auth Apple] ❌ Erreur envoi email bienvenue:', e.message);
+    }
+  } else {
+    // User existant → upgrade email_verified (Apple a vérifié l'email), ne PAS toucher verified (KYC ZUKAGO)
+    if (!user.email_verified) {
+      await db.from('users').update({ email_verified: true }).eq('id', user.id);
+      user.email_verified = true;
+    }
+  }
+
+  const tokens = generateTokens(user.id);
+  const refreshExpires = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  await db.from('users').update({
+    refresh_token:         tokens.refreshToken,
+    refresh_token_expires: refreshExpires,
+  }).eq('id', user.id);
+
+  const { password: _apple, ...userSafe } = user;
+  res.json({ user: userSafe, ...tokens });
+}));
+
 // POST /api/auth/refresh
 router.post('/refresh', asyncHandler(async (req, res) => {
   const { refreshToken } = req.body;

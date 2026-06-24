@@ -224,7 +224,7 @@ async function finalizePaidBooking(booking) {
 //   ⚠️ Route NON authentifiée (vient de pawaPay). Sécuriser par whitelist IP
 //      (voir pawapayService) + signature (Phase sécurité).
 router.post('/callback/deposit', asyncHandler(async (req, res) => {
-  if (!pawapay.verifyCallbackSignature(req.headers, req.body)) {
+  if (!(await pawapay.verifyCallbackSignature(req.headers, req.rawBody, { method: req.method, path: req.originalUrl, authority: req.get('host') }))) {
     console.log('[pawapay callback/deposit] signature invalide');
     return res.status(401).json({ error: 'bad signature' });
   }
@@ -259,7 +259,7 @@ router.post('/callback/deposit', asyncHandler(async (req, res) => {
 
 // ─── POST /callback/payout — pawaPay confirme le virement partenaire ──────
 router.post('/callback/payout', asyncHandler(async (req, res) => {
-  if (!pawapay.verifyCallbackSignature(req.headers, req.body)) {
+  if (!(await pawapay.verifyCallbackSignature(req.headers, req.rawBody, { method: req.method, path: req.originalUrl, authority: req.get('host') }))) {
     console.log('[pawapay callback/payout] signature invalide');
     return res.status(401).json({ error: 'bad signature' });
   }
@@ -321,7 +321,7 @@ router.post('/callback/payout', asyncHandler(async (req, res) => {
 
 // ─── POST /callback/refund — pawaPay confirme le remboursement client ─────
 router.post('/callback/refund', asyncHandler(async (req, res) => {
-  if (!pawapay.verifyCallbackSignature(req.headers, req.body)) {
+  if (!(await pawapay.verifyCallbackSignature(req.headers, req.rawBody, { method: req.method, path: req.originalUrl, authority: req.get('host') }))) {
     console.log('[pawapay callback/refund] signature invalide');
     return res.status(401).json({ error: 'bad signature' });
   }

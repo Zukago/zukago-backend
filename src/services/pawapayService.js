@@ -23,6 +23,20 @@ const crypto = require('crypto');
 const PAWAPAY_BASE_URL = (process.env.PAWAPAY_BASE_URL || 'https://api.sandbox.pawapay.io').replace(/\/$/, '');
 const PAWAPAY_TOKEN    = process.env.PAWAPAY_API_TOKEN || '';
 
+// Vérification de signature des callbacks : 'off' | 'log' | 'enforce'
+//   off     = ne vérifie rien (renvoie true) — comportement initial
+//   log     = vérifie + écrit le résultat dans les logs MAIS ne bloque jamais
+//   enforce = bloque (401) si digest OU signature invalide
+const PAWAPAY_SIGNATURE_MODE = (process.env.PAWAPAY_SIGNATURE_MODE || 'off').toLowerCase();
+
+// Lib RFC-9421 chargée paresseusement : si pas encore installée, le module
+// se charge quand même (pas de crash). → npm install http-message-signatures
+let _httpSig = null;
+try { _httpSig = require('http-message-signatures'); } catch (_) { /* non installé */ }
+
+// Cache des clés publiques pawaPay (rafraîchi ~1×/h)
+let _pubKeys = null, _pubKeysAt = 0;
+
 // Opérateurs Cameroun → "correspondents" pawaPay
 const CMR_CORRESPONDENTS = {
   mtn:    'MTN_MOMO_CMR',
@@ -136,17 +150,76 @@ async function initiateRefund({ depositId, amountFcfa, statementDescription }) {
   return { refundId, ...res };
 }
 
-// ── 4) Vérification signature des callbacks (RFC-9421) — À COMPLÉTER ──────
-//   pawaPay peut signer ses callbacks (en-têtes Signature / Signature-Input /
-//   Content-Digest). TODO : implémenter la vérif RFC-9421 avec la clé publique
-//   pawaPay (endpoint Public Keys) avant la PROD.
-//   En attendant : sécuriser par WHITELIST des IP pawaPay au niveau infra :
-//     Prod : 18.192.208.15, 18.195.113.136, 3.72.212.107, 54.73.125.42,
-//            54.155.38.214, 54.73.130.113   ·   Sandbox : 3.64.89.224
-function verifyCallbackSignature(/* headers, rawBody */) {
-  // Placeholder : true tant que la vérif signée n'est pas activée.
-  // ⚠️ À implémenter avant la prod (sécurité).
-  return true;
+// ── 4) Vérification signature des callbacks (RFC-9421) ───────────────────
+//   pawaPay signe ses callbacks : en-têtes Content-Digest / Signature /
+//   Signature-Input (alg ecdsa-p256-sha256). On vérifie :
+//     1) Content-Digest == hash(corps brut)  → le corps n'a pas été modifié
+//     2) la signature RFC-9421 avec la clé publique pawaPay (GET /public-key/http)
+//   Activation progressive via PAWAPAY_SIGNATURE_MODE (off → log → enforce).
+
+// Récupère + cache les clés publiques pawaPay : { id: pemKey }
+async function getPawapayPublicKeys() {
+  const now = Date.now();
+  if (_pubKeys && (now - _pubKeysAt) < 3600000) return _pubKeys;
+  const res = await fetch(`${PAWAPAY_BASE_URL}/public-key/http`, {
+    headers: { 'Authorization': `Bearer ${PAWAPAY_TOKEN}` },
+  });
+  if (!res.ok) throw new Error(`public-key/http HTTP ${res.status}`);
+  const arr = await res.json(); // [{ id, key }]
+  const map = {};
+  for (const k of (Array.isArray(arr) ? arr : [])) map[k.id] = k.key;
+  _pubKeys = map; _pubKeysAt = now;
+  return map;
+}
+
+// Vérifie l'en-tête Content-Digest (sha-256/sha-512=:base64:) vs le corps brut
+function verifyContentDigest(rawBody, header) {
+  if (!header || !rawBody) return false;
+  const m = String(header).match(/(sha-256|sha-512)=:([^:]+):/i);
+  if (!m) return false;
+  const algo = m[1].toLowerCase() === 'sha-256' ? 'sha256' : 'sha512';
+  const expected = m[2];
+  const actual = crypto.createHash(algo).update(rawBody).digest('base64');
+  const a = Buffer.from(actual), b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+//   headers : req.headers (clés en minuscules)
+//   rawBody : Buffer du corps brut (capté via express.json({verify}) dans index.js)
+//   reqInfo : { method, path, authority } pour reconstruire la base de signature
+async function verifyCallbackSignature(headers = {}, rawBody, reqInfo = {}) {
+  if (PAWAPAY_SIGNATURE_MODE === 'off') return true;
+
+  let digestOk = false, sigOk = false, detail = '';
+
+  try { digestOk = verifyContentDigest(rawBody, headers['content-digest']); }
+  catch (e) { detail += ` digestErr=${e.message}`; }
+
+  try {
+    if (!_httpSig) throw new Error('http-message-signatures non installé');
+    if (!PAWAPAY_TOKEN) throw new Error('PAWAPAY_API_TOKEN absent');
+    const keys = await getPawapayPublicKeys();
+    const authority = reqInfo.authority || headers['host'] || '';
+    const url = `https://${authority}${reqInfo.path || ''}`;
+    const result = await _httpSig.httpbis.verifyMessage({
+      async keyLookup(params) {
+        const pem = keys[params.keyid];
+        if (!pem) return null;
+        return {
+          id: params.keyid,
+          algs: ['ecdsa-p256-sha256'],
+          verify: async (data, signature) =>
+            crypto.verify('sha256', data, { key: pem, dsaEncoding: 'ieee-p1363' }, signature),
+        };
+      },
+    }, { method: reqInfo.method || 'POST', url, headers });
+    sigOk = (result === true);
+  } catch (e) { detail += ` sigErr=${e.message}`; }
+
+  console.log(`[pawapay signature] mode=${PAWAPAY_SIGNATURE_MODE} digest=${digestOk} sig=${sigOk}${detail}`);
+
+  if (PAWAPAY_SIGNATURE_MODE === 'log') return true; // ne bloque jamais en mode log
+  return digestOk && sigOk;                            // enforce
 }
 
 module.exports = {
@@ -154,6 +227,7 @@ module.exports = {
   initiatePayout,
   initiateRefund,
   verifyCallbackSignature,
+  getPawapayPublicKeys,
   toMsisdn,
   toPawapayAmount,
   correspondentFor,
