@@ -565,6 +565,12 @@ router.patch('/:id/confirm-partner', authenticate, asyncHandler(async (req, res)
 
   if (!booking) return res.status(404).json({ error: 'Réservation introuvable' });
 
+  // ✅ SÉCURITÉ : seuls le partenaire de l'annonce (ou un admin) peut confirmer côté propriétaire.
+  const confirmPartnerUserId = booking.listings?.partners?.user_id;
+  if (req.user.id !== confirmPartnerUserId && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Non autorisé' });
+  }
+
   await db.from('bookings').update({ status: 'confirmed' }).eq('id', req.params.id);
 
   // Notifier le client (V13 : sans emoji UI)
@@ -586,9 +592,15 @@ router.patch('/:id/confirm-partner', authenticate, asyncHandler(async (req, res)
 // ✅ V14.8 Phase 2c — Aperçu du remboursement AVANT d'annuler (ne modifie rien)
 router.get('/:id/cancellation-preview', authenticate, asyncHandler(async (req, res) => {
   const { data: b } = await db.from('bookings')
-    .select('id, subtotal, service_fee, partner_gets, start_date, status, payment_status, listings(cancel_policy, partner_id)')
+    .select('id, user_id, subtotal, service_fee, partner_gets, start_date, status, payment_status, listings(cancel_policy, partner_id, partners(user_id))')
     .eq('id', req.params.id).single();
   if (!b) return res.status(404).json({ error: 'Réservation introuvable' });
+
+  // ✅ SÉCURITÉ : seuls le client, le partenaire de l'annonce, ou un admin peuvent voir l'aperçu.
+  const previewPartnerUserId = b.listings?.partners?.user_id;
+  if (b.user_id !== req.user.id && req.user.id !== previewPartnerUserId && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Non autorisé' });
+  }
 
   const calc = await cancellationService.compute(b, b.listings || {});
   res.json({
@@ -605,9 +617,15 @@ router.get('/:id/cancellation-preview', authenticate, asyncHandler(async (req, r
 // ─── PATCH /api/bookings/:id/cancel — Annuler réservation
 router.patch('/:id/cancel', authenticate, asyncHandler(async (req, res) => {
   const { reason } = req.body;
-  const { data: booking } = await db.from('bookings').select('user_id, seats_booked, listing_id').eq('id', req.params.id).single();
+  const { data: booking } = await db.from('bookings').select('user_id, seats_booked, listing_id, listings(partner_id, partners(user_id))').eq('id', req.params.id).single();
 
   if (!booking) return res.status(404).json({ error: 'Réservation introuvable' });
+
+  // ✅ SÉCURITÉ : seuls le client (propriétaire de la résa), le partenaire de l'annonce, ou un admin peuvent annuler.
+  const cancelPartnerUserId = booking.listings?.partners?.user_id;
+  if (booking.user_id !== req.user.id && req.user.id !== cancelPartnerUserId && req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Non autorisé' });
+  }
 
   await db.from('bookings').update({ status: 'cancelled' }).eq('id', req.params.id);
 

@@ -54,6 +54,21 @@ const validatePhotos = async (req, res, next) => {
   }
 };
 
+// ✅ SÉCURITÉ : l'annonce appartient-elle au partenaire de req.user (ou admin) ?
+//   Renvoie true si OK ; sinon répond (404/403) et renvoie false.
+//   Miroir de _assertListingOwner (listings.js) — empêche d'ajouter/supprimer
+//   des photos sur l'annonce d'autrui (IDOR).
+async function _ownsListing(req, res, listingId) {
+  if (!listingId) { res.status(404).json({ error: 'Annonce introuvable' }); return false; }
+  const { data: listing } = await db.from('listings')
+    .select('id, partners(user_id)').eq('id', listingId).single();
+  if (!listing) { res.status(404).json({ error: 'Annonce introuvable' }); return false; }
+  const isOwner = listing.partners?.user_id === req.user.id;
+  const isAdmin = req.user.role === 'admin';
+  if (!isOwner && !isAdmin) { res.status(403).json({ error: 'Non autorisé' }); return false; }
+  return true;
+}
+
 // ─── POST /api/uploads/listing/:id — Photos d'une annonce ────────────────────
 router.post('/listing/:id', authenticate,
   uploadListing.array('photos', 15),
@@ -61,6 +76,8 @@ router.post('/listing/:id', authenticate,
   asyncHandler(async (req, res) => {
     const { id } = req.params;
     const L = await _resolveLang(req);
+    // ✅ SÉCURITÉ : seul le propriétaire de l'annonce (ou admin) peut y ajouter des photos
+    if (!(await _ownsListing(req, res, id))) return;
     if (!req.files?.length) return res.status(400).json({ error: await i18n.t('uploads_error_no_photo', L, 'Aucune photo envoyée') });
 
     const photos = req.files.map((file, index) => ({
@@ -81,8 +98,11 @@ router.post('/listing/:id', authenticate,
 // ─── DELETE /api/uploads/photo/:id — Supprimer une photo ─────────────────────
 router.delete('/photo/:id', authenticate, asyncHandler(async (req, res) => {
   const L = await _resolveLang(req);
-  const { data: photo } = await db.from('listing_photos').select('public_id').eq('id', req.params.id).single();
+  const { data: photo } = await db.from('listing_photos').select('public_id, listing_id').eq('id', req.params.id).single();
   if (!photo) return res.status(404).json({ error: await i18n.t('uploads_error_photo_not_found', L, 'Photo introuvable') });
+
+  // ✅ SÉCURITÉ : seul le propriétaire de l'annonce (ou admin) peut supprimer ses photos
+  if (!(await _ownsListing(req, res, photo.listing_id))) return;
 
   await deleteImage(photo.public_id);
   await db.from('listing_photos').delete().eq('id', req.params.id);
@@ -105,11 +125,13 @@ router.post('/room-type/:id', authenticate,
 
     // Fusionner avec les photos existantes
     const { data: existing, error: selectErr } = await db.from('listing_room_types')
-      .select('photos').eq('id', id).single();
+      .select('photos, listing_id').eq('id', id).single();
     if (selectErr) {
       console.error(`[upload room-type] select error:`, selectErr);
       return res.status(404).json({ error: await i18n.t('uploads_error_room_type_not_found', L, 'Type de chambre introuvable') });
     }
+    // ✅ SÉCURITÉ : seul le propriétaire de l'annonce (ou admin) peut ajouter des photos à ce type de chambre
+    if (!(await _ownsListing(req, res, existing.listing_id))) return;
     const merged = [...(existing?.photos || []), ...newUrls];
 
     const { data: updated, error } = await db.from('listing_room_types')

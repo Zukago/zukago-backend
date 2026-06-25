@@ -45,11 +45,11 @@ router.post('/change-password', authenticate, asyncHandler(async (req, res) => {
   }
 
   // Hash le nouveau mot de passe
-  const password_hash = await bcrypt.hash(new_password, 10);
+  const password_hash = await bcrypt.hash(new_password, 12);
 
   // Update DB
   const { error } = await db.from('users')
-    .update({ password_hash, updated_at: new Date() })
+    .update({ password: password_hash, updated_at: new Date() })
     .eq('id', req.user.id);
 
   if (error) {
@@ -79,7 +79,7 @@ router.delete('/me', authenticate, asyncHandler(async (req, res) => {
       phone:         null,
       whatsapp:      null,
       avatar:        null,
-      password_hash: null,
+      password:      null,
       is_deleted:    true,
       deleted_at:    new Date(),
       updated_at:    new Date(),
