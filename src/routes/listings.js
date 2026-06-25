@@ -32,6 +32,7 @@ router.get('/', optionalAuth, asyncHandler(async (req, res) => {
       *,
       listing_photos(url, is_main),
       listing_amenities(amenity_code),
+      listing_room_types(*),
       reviews(rating)
     `)
     .eq('status', 'active')
