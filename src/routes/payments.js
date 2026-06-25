@@ -324,6 +324,41 @@ router.post('/stripe/webhook', async (req, res) => {
           return res.json({ received: true });
         }
 
+        // ✅ FIX V14.9 — Garde-fous AVANT création (PURE ADD) :
+        //   1) Idempotence : si un booking existe déjà pour ce paiement, ne rien refaire
+        //      (gère les webhooks Stripe rejoués → évite les doublons ET un faux conflit).
+        //   2) Anti double-réservation (course) : deux paiements simultanés peuvent passer
+        //      /prepare puis arriver ici tous les deux. On re-vérifie l'overlap ; si conflit,
+        //      on REMBOURSE ce paiement et on NE crée PAS de booking.
+        {
+          const { data: existingForPi } = await db.from('bookings')
+            .select('id').eq('payment_ref', pi.id).limit(1);
+          if (existingForPi?.length) {
+            console.log('[Stripe webhook V14.4] Booking déjà créé pour ce PI, skip (idempotence):', pi.id);
+            return res.json({ received: true });
+          }
+          try {
+            const overlap = await checkOverlapPrepare(listing, params);
+            if (overlap.conflict) {
+              console.log('[Stripe webhook V14.4] ⚠️ Conflit overlap au webhook → remboursement, pas de booking. Raison:', overlap.reason);
+              try {
+                const refund = await stripe.refunds.create({
+                  payment_intent: pi.id,
+                  reason:         'requested_by_customer',
+                  metadata:       { reason: 'overlap_conflict', listing_id: String(meta.listing_id), user_id: String(meta.user_id) },
+                }, { idempotencyKey: 'refund_overlap_' + pi.id });
+                console.log('[Stripe webhook V14.4] ✅ Remboursement émis (conflit overlap):', refund.id);
+              } catch (rErr) {
+                console.log('[Stripe webhook V14.4] ❌ Échec remboursement conflit overlap:', rErr.message);
+              }
+              return res.json({ received: true });
+            }
+          } catch (oErr) {
+            // Graceful : si le check échoue (erreur transitoire), on NE bloque PAS la création.
+            console.log('[Stripe webhook V14.4] check overlap webhook échoué (on continue):', oErr.message);
+          }
+        }
+
         // Générer un code de réservation unique
         const code = 'ZKG-' + Math.random().toString(36).substring(2, 8).toUpperCase();
 

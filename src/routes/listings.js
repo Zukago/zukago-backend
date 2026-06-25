@@ -583,6 +583,15 @@ router.post('/', authenticate, requirePartner, [
 
     if (covError) throw new Error(covError.message);
 
+    // ✅ V14.9 : enregistrer les options (amenities) du covoiturage — manquait car la
+    //    branche cov return-ait AVANT l'insert amenities de la branche classique.
+    //    Miroir exact de l'insert classique. Le PATCH gère déjà les amenities (générique).
+    if (amenities?.length) {
+      await db.from('listing_amenities').insert(
+        amenities.map(code => ({ listing_id: covListing.id, amenity_code: code }))
+      );
+    }
+
     return res.status(201).json({
       listing: covListing,
       message: await i18n.t('listings_carpool_published', L, 'Trajet covoiturage publié'),
